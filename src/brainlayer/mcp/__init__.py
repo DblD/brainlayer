@@ -1925,7 +1925,7 @@ async def _store(
                 {
                     "content": content,
                     "memory_type": memory_type,
-                    "project": project,
+                    "project": _normalize_project_name(project),
                     "tags": tags,
                     "importance": importance,
                     "confidence_score": confidence_score,

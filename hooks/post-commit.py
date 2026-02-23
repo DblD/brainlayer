@@ -10,20 +10,13 @@ into BrainLayer for searchable history. Requires `brainlayer` CLI on PATH.
 
 import os
 import subprocess
-import sys
 
 
 def main():
     try:
-        commit_hash = (
-            subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
-        )
+        commit_hash = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL).decode().strip()
         commit_msg = (
-            subprocess.check_output(["git", "log", "-1", "--pretty=%B"], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
+            subprocess.check_output(["git", "log", "-1", "--pretty=%B"], stderr=subprocess.DEVNULL).decode().strip()
         )
         files_changed = (
             subprocess.check_output(
@@ -41,9 +34,7 @@ def main():
     # Detect project from repo root directory name
     try:
         repo_root = (
-            subprocess.check_output(["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
+            subprocess.check_output(["git", "rev-parse", "--show-toplevel"], stderr=subprocess.DEVNULL).decode().strip()
         )
         project = os.path.basename(repo_root)
     except (subprocess.CalledProcessError, FileNotFoundError):
@@ -56,15 +47,26 @@ def main():
 
     content = f"Commit {commit_hash[:8]}: {commit_msg}\nFiles: {', '.join(files_display)}"
 
-    # Build brainlayer store command
-    cmd = ["brainlayer-store", "--type", "journal", "--content", content, "--tags", "commit,git"]
-    if project:
-        cmd.extend(["--project", project])
-
+    # Store via brainlayer Python API (faster than subprocess, works in venv)
     try:
-        subprocess.run(cmd, capture_output=True, timeout=10)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        # brainlayer not installed or hanging — don't block the commit
+        from brainlayer.embeddings import get_embedding_model
+        from brainlayer.paths import DEFAULT_DB_PATH
+        from brainlayer.store import store_memory
+        from brainlayer.vector_store import VectorStore
+
+        store = VectorStore(DEFAULT_DB_PATH)
+        model = get_embedding_model()
+        store_memory(
+            store=store,
+            embed_fn=model.embed_query,
+            content=content,
+            memory_type="journal",
+            project=project,
+            tags=["commit", "git"],
+        )
+        store.close()
+    except Exception:
+        # brainlayer not installed or any error — don't block the commit
         pass
 
 

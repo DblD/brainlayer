@@ -96,7 +96,7 @@ def resolve_project_scope() -> Optional[str]:
     matches = []
     for prefix, project in scope_map.items():
         expanded = str(Path(prefix).expanduser())
-        if cwd.startswith(expanded):
+        if cwd == expanded or cwd.startswith(expanded + os.sep):
             matches.append((len(expanded), project))
 
     if matches:
