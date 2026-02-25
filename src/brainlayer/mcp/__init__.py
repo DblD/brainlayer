@@ -1088,15 +1088,20 @@ async def _brain_digest(
 
     store = _get_vector_store()
     model = _get_embedding_model()
+    loop = asyncio.get_event_loop()
+    norm_project = _normalize_project_name(project) if project else None
 
     try:
-        result = digest_content(
-            content=content,
-            store=store,
-            embed_fn=model.embed,
-            title=title,
-            project=_normalize_project_name(project) if project else None,
-            participants=participants,
+        result = await loop.run_in_executor(
+            None,
+            lambda: digest_content(
+                content=content,
+                store=store,
+                embed_fn=model.embed,
+                title=title,
+                project=norm_project,
+                participants=participants,
+            ),
         )
         return CallToolResult(
             content=[TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -1118,13 +1123,21 @@ async def _brain_entity(
 
     store = _get_vector_store()
     model = _get_embedding_model()
+    loop = asyncio.get_event_loop()
 
-    result = entity_lookup(
-        query=query,
-        store=store,
-        embed_fn=model.embed,
-        entity_type=entity_type,
-    )
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: entity_lookup(
+                query=query,
+                store=store,
+                embed_fn=model.embed,
+                entity_type=entity_type,
+            ),
+        )
+    except Exception as e:
+        return _error_result(f"Entity lookup failed: {e}")
+
     if result is None:
         return CallToolResult(
             content=[TextContent(type="text", text=f"No entity found matching '{query}'.")]

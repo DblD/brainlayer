@@ -29,7 +29,6 @@ ACTION_PATTERNS = [
     re.compile(r"(?:action items?|todo|to-do|tasks?)[:]\s*(.*?)(?:\n\n|\Z)", re.I | re.S),
     re.compile(r"(?:^|\n)\s*\d+\.\s+(.*?)(?=\n\s*\d+\.|\n\n|\Z)", re.S),
     re.compile(r"(?:^|\n)\s*[-*]\s+(?:TODO|ACTION|TASK)[:.]?\s*(.*?)(?:\n|$)", re.I),
-    re.compile(r"\b(?:need to|should|must|will)\s+(.{10,80}?)(?:\.|$)", re.I),
 ]
 
 # Decision patterns
@@ -92,6 +91,7 @@ def _classify_confidence(entities: list) -> Dict[str, int]:
     """Classify entities into confidence tiers."""
     high = 0
     needs_review = 0
+    low = 0
     for entity in entities:
         conf = entity.get("confidence", 0)
         if conf >= HIGH_CONFIDENCE_THRESHOLD:
@@ -99,8 +99,8 @@ def _classify_confidence(entities: list) -> Dict[str, int]:
         elif conf >= MEDIUM_CONFIDENCE_THRESHOLD:
             needs_review += 1
         else:
-            needs_review += 1
-    return {"high_confidence": high, "needs_review": needs_review}
+            low += 1
+    return {"high_confidence": high, "needs_review": needs_review, "low_confidence": low}
 
 
 def digest_content(
