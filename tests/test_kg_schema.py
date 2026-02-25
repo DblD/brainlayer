@@ -117,12 +117,15 @@ class TestEntityCRUD:
 
     def test_upsert_entity_updates_on_conflict(self, store):
         store.upsert_entity("person-1", "person", "Etan Heyman", metadata={"v": 1})
-        store.upsert_entity("person-2", "person", "Etan Heyman", metadata={"v": 2})
+        returned_id = store.upsert_entity("person-2", "person", "Etan Heyman", metadata={"v": 2})
 
         # Should update the existing entity (UNIQUE on entity_type, name)
         entity = store.get_entity_by_name("person", "Etan Heyman")
         assert entity is not None
         assert entity["metadata"]["v"] == 2
+        # Original ID is preserved on conflict, and upsert_entity returns it
+        assert entity["id"] == "person-1"
+        assert returned_id == "person-1"
 
     def test_get_entity_not_found(self, store):
         result = store.get_entity("nonexistent")
@@ -356,25 +359,26 @@ class TestEntityFTS:
         assert results[0]["entity_type"] == "golem"
 
     def test_fts_trigger_updates_on_entity_update(self, store):
-        store.upsert_entity("person-1", "person", "Old Name", metadata={"info": "original"})
+        store.upsert_entity("person-1", "person", "AlphaOriginal", metadata={"info": "original"})
 
         # Search for old name
-        results = store.search_entities("Old Name")
+        results = store.search_entities("AlphaOriginal")
         assert len(results) >= 1
 
         # Update entity — triggers should update FTS
         cursor = store.conn.cursor()
         cursor.execute(
             "UPDATE kg_entities SET name = ?, updated_at = datetime('now') WHERE id = ?",
-            ("New Name", "person-1"),
+            ("BetaUpdated", "person-1"),
         )
 
-        # Old name should not appear
-        old_results = store.search_entities("Old Name")
+        # Old name should not appear after trigger (use unique term to avoid OR matching)
+        old_results = store.search_entities("AlphaOriginal")
+        assert len(old_results) == 0
         # New name should appear
-        new_results = store.search_entities("New Name")
+        new_results = store.search_entities("BetaUpdated")
         assert len(new_results) >= 1
-        assert all(r["name"] != "Old Name" for r in new_results)
+        assert new_results[0]["name"] == "BetaUpdated"
 
     def test_fts_trigger_on_delete(self, store):
         store.upsert_entity("person-1", "person", "Deletable Entity")

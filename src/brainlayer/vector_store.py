@@ -365,8 +365,8 @@ class VectorStore:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS kg_relations (
                 id TEXT PRIMARY KEY,
-                source_id TEXT NOT NULL REFERENCES kg_entities(id),
-                target_id TEXT NOT NULL REFERENCES kg_entities(id),
+                source_id TEXT NOT NULL,
+                target_id TEXT NOT NULL,
                 relation_type TEXT NOT NULL,
                 properties TEXT DEFAULT '{}',
                 confidence REAL DEFAULT 1.0,
@@ -381,8 +381,8 @@ class VectorStore:
         # Bridge table — links entities to existing 270K chunks with relevance scoring
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS kg_entity_chunks (
-                entity_id TEXT NOT NULL REFERENCES kg_entities(id),
-                chunk_id TEXT NOT NULL REFERENCES chunks(id),
+                entity_id TEXT NOT NULL,
+                chunk_id TEXT NOT NULL,
                 relevance REAL DEFAULT 1.0,
                 context TEXT,
                 PRIMARY KEY (entity_id, chunk_id)
@@ -2037,14 +2037,22 @@ class VectorStore:
             (entity_id, entity_type, name, meta_json, now, now),
         )
 
+        # Retrieve the actual stored ID (may differ from entity_id on conflict)
+        stored_id = list(
+            cursor.execute(
+                "SELECT id FROM kg_entities WHERE entity_type = ? AND name = ?",
+                (entity_type, name),
+            )
+        )[0][0]
+
         if embedding is not None:
             embedding_bytes = serialize_f32(embedding)
             cursor.execute(
                 "INSERT OR REPLACE INTO kg_vec_entities (entity_id, embedding) VALUES (?, ?)",
-                (entity_id, embedding_bytes),
+                (stored_id, embedding_bytes),
             )
 
-        return entity_id
+        return stored_id
 
     def add_relation(
         self,
@@ -2069,7 +2077,15 @@ class VectorStore:
             """,
             (relation_id, source_id, target_id, relation_type, props_json, confidence),
         )
-        return relation_id
+
+        # Retrieve the actual stored ID (may differ from relation_id on conflict)
+        stored_id = list(
+            cursor.execute(
+                "SELECT id FROM kg_relations WHERE source_id = ? AND target_id = ? AND relation_type = ?",
+                (source_id, target_id, relation_type),
+            )
+        )[0][0]
+        return stored_id
 
     def link_entity_chunk(
         self,
@@ -2297,6 +2313,8 @@ class VectorStore:
         query_bytes = serialize_f32(query_embedding)
 
         if entity_type:
+            # Over-fetch since vec0 applies k before WHERE filter on entity_type
+            fetch_k = min(max(limit * 3, limit + 50), 500)
             rows = list(
                 cursor.execute(
                     """
@@ -2307,9 +2325,10 @@ class VectorStore:
                     WHERE v.embedding MATCH ? AND k = ? AND e.entity_type = ?
                     ORDER BY v.distance
                     """,
-                    (query_bytes, limit, entity_type),
+                    (query_bytes, fetch_k, entity_type),
                 )
             )
+            rows = rows[:limit]
         else:
             rows = list(
                 cursor.execute(
