@@ -1,10 +1,13 @@
 """Phase 3: Brain Digest + Brain Entity tests."""
 
-import json
 from typing import List
-from unittest.mock import patch
 
 from brainlayer.vector_store import VectorStore
+
+
+def _dummy_embed(text):  # noqa: ARG001
+    """Dummy embedding function for tests."""
+    return [0.1] * 1024
 
 
 def _insert_chunks(store: VectorStore, ids: List[str], documents: List[str],
@@ -63,7 +66,7 @@ def test_digest_content_returns_structured_result(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="Etan met with Dor Zohar to discuss the Domica project. They decided to use React Native.",
@@ -89,7 +92,7 @@ def test_digest_content_creates_chunk(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="Some meeting notes about testing.",
@@ -113,7 +116,7 @@ def test_digest_content_extracts_entities(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="Etan Heyman discussed brainlayer architecture with Dor Zohar at Cantaloupe AI.",
@@ -132,7 +135,7 @@ def test_digest_content_applies_sentiment(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="This is amazing! Everything works perfectly!",
@@ -149,7 +152,7 @@ def test_digest_content_confidence_tiers(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="Etan Heyman works at Cantaloupe AI on the brainlayer project.",
@@ -168,7 +171,7 @@ def test_digest_content_empty_raises(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     import pytest
     with pytest.raises(ValueError, match="content must be non-empty"):
@@ -180,7 +183,7 @@ def test_digest_extracts_action_items(tmp_path):
     from brainlayer.pipeline.digest import digest_content
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = digest_content(
         content="Action items: 1. Send the proposal to Avi by Friday. 2. Schedule a follow-up meeting with Dor.",
@@ -199,6 +202,7 @@ def test_digest_extracts_action_items(tmp_path):
 def test_brain_digest_tool_exists():
     """brain_digest tool is registered in MCP server."""
     import asyncio
+
     from brainlayer.mcp import list_tools
 
     tools = asyncio.run(list_tools())
@@ -209,6 +213,7 @@ def test_brain_digest_tool_exists():
 def test_brain_digest_schema_has_required_fields():
     """brain_digest tool has content as required field."""
     import asyncio
+
     from brainlayer.mcp import list_tools
 
     tools = asyncio.run(list_tools())
@@ -226,6 +231,7 @@ def test_brain_digest_schema_has_required_fields():
 def test_brain_entity_tool_exists():
     """brain_entity tool is registered in MCP server."""
     import asyncio
+
     from brainlayer.mcp import list_tools
 
     tools = asyncio.run(list_tools())
@@ -236,6 +242,7 @@ def test_brain_entity_tool_exists():
 def test_brain_entity_schema():
     """brain_entity requires query parameter."""
     import asyncio
+
     from brainlayer.mcp import list_tools
 
     tools = asyncio.run(list_tools())
@@ -250,7 +257,7 @@ def test_entity_lookup_returns_structured_data(tmp_path):
     from brainlayer.pipeline.digest import entity_lookup
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     # Create an entity with a chunk
     eid = store.upsert_entity("person-etan", "person", "Etan Heyman",
@@ -273,7 +280,7 @@ def test_entity_lookup_not_found(tmp_path):
     from brainlayer.pipeline.digest import entity_lookup
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     result = entity_lookup("Nonexistent Person", store, dummy_embed)
     assert result is None
@@ -287,7 +294,7 @@ def test_full_digest_pipeline(tmp_path):
     from brainlayer.pipeline.digest import digest_content, entity_lookup
 
     store = VectorStore(tmp_path / "test.db")
-    dummy_embed = lambda text: [0.1] * 1024
+    dummy_embed = _dummy_embed
 
     # Digest some content
     result = digest_content(
