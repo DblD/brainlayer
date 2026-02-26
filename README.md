@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![MCP](https://img.shields.io/badge/MCP-7%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-525%20passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-510%20passing-brightgreen.svg)](#testing)
 [![Docs](https://img.shields.io/badge/docs-etanhey.github.io%2Fbrainlayer-blue.svg)](https://etanhey.github.io/brainlayer)
 
 ---
@@ -128,7 +128,7 @@ graph LR
 | `brain_digest` | Ingest raw content — entity extraction, relations, sentiment, action items. |
 | `brain_entity` | Look up entities in the knowledge graph — type, relations, evidence. |
 | `brain_update` | Update, archive, or merge existing memories. |
-| `brain_get_person` | Person lookup — entity details, interactions, preferences (~200ms). |
+| `brain_get_person` | Person lookup — entity details, interactions, preferences (~200-500ms). |
 
 ### Backward Compatibility
 

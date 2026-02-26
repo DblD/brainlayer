@@ -15,6 +15,8 @@ BrainLayer fixes this. It's a **local-first memory layer** that gives any MCP-co
 - **Multi-source** — Claude Code, WhatsApp, YouTube, Markdown, Claude Desktop, manual
 - **Works everywhere** — Claude Code, Cursor, Zed, VS Code, any MCP client
 
+All old `brainlayer_*` tool names (14 aliases) still work alongside new consolidated names.
+
 ## Quick Example
 
 ```bash

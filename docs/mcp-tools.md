@@ -34,11 +34,13 @@ Persist a memory (idea, decision, learning, mistake, etc.) for future retrieval.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `content` | string | Yes | The memory content to store |
-| `type` | string | No | Memory type: idea, mistake, decision, learning, todo, bookmark, note, journal (auto-detected if omitted) |
+| `type` | string | No | Memory type: idea, mistake, decision, learning, issue, todo, bookmark, note, journal (auto-detected if omitted) |
 | `project` | string | No | Project to scope the memory |
 | `tags` | array[string] | No | Tags for categorization |
 | `importance` | integer | No | Importance score 1-10 (auto-detected if omitted) |
 | `entity_id` | string | No | Link memory to a KG entity |
+
+Issue type supports lifecycle tracking: status (open→in_progress→done→archived), severity (critical/high/medium/low), and code references (file_path, function_name, line_number).
 
 **Returns:** Chunk ID and related existing memories.
 
@@ -92,6 +94,7 @@ Look up a known entity in the knowledge graph. Returns entity type, relations, a
 |-----------|------|----------|-------------|
 | `query` | string | Yes | Entity name or search query |
 | `entity_id` | string | No | Direct entity ID lookup |
+| `entity_type` | string | No | Filter by type: person, company, project, golem, technology, concept |
 
 **Returns:** Entity details (type, metadata), relations to other entities, and linked chunks.
 
