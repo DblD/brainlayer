@@ -240,7 +240,7 @@ The daemon (`brainlayer serve --http 8787`) exposes a FastAPI server used by the
 
 ---
 
-## MCP Server (3 Tools)
+## MCP Server (7 Tools)
 
 Add to `~/.claude/settings.json`:
 
@@ -255,13 +255,22 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-### Available Tools (3)
+### Core Tools (3)
 
 | Tool | Description |
 |------|-------------|
 | `brain_search` | Unified semantic search — query, file_path, chunk_id, or filters. |
 | `brain_store` | Persist memories (ideas, decisions, learnings, mistakes). Auto-type/auto-importance. |
 | `brain_recall` | Proactive retrieval — current context, sessions, session summaries. |
+
+### Knowledge Graph Tools (4)
+
+| Tool | Description |
+|------|-------------|
+| `brain_digest` | Ingest raw content — entity extraction, relations, sentiment, action items. |
+| `brain_entity` | Look up entities in the knowledge graph — type, relations, evidence. |
+| `brain_update` | Update, archive, or merge existing memories. |
+| `brain_get_person` | Person lookup — entity details, interactions, preferences. |
 
 ### Backward Compatibility
 
