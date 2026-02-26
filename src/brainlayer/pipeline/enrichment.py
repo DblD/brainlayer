@@ -28,6 +28,7 @@ AIDEV-NOTE: Two prompt paths exist:
 
 import json
 import os
+import random
 import sys
 import threading
 import time
@@ -88,6 +89,14 @@ MLX_MODEL = os.environ.get("BRAINLAYER_MLX_MODEL", "mlx-community/Qwen2.5-Coder-
 STALL_TIMEOUT = int(os.environ.get("BRAINLAYER_STALL_TIMEOUT", "300"))  # 5 minutes default
 # Heartbeat: log progress every N chunks (min 1 to avoid ZeroDivisionError)
 HEARTBEAT_INTERVAL = max(1, int(os.environ.get("BRAINLAYER_HEARTBEAT_INTERVAL", "25")))
+# Retry: per-chunk retry with exponential backoff
+MAX_RETRIES = int(os.environ.get("BRAINLAYER_MAX_RETRIES", "2"))  # 0=no retry, 2=up to 3 attempts
+RETRY_BASE_DELAY = float(os.environ.get("BRAINLAYER_RETRY_BASE_DELAY", "2.0"))  # seconds
+RETRY_MAX_DELAY = float(os.environ.get("BRAINLAYER_RETRY_MAX_DELAY", "30.0"))  # cap
+# Circuit breaker: abort batch after N consecutive failures (backend probably dead)
+CIRCUIT_BREAKER_THRESHOLD = int(os.environ.get("BRAINLAYER_CIRCUIT_BREAKER", "10"))
+# MLX default timeout (shorter than Ollama — MLX should respond faster)
+MLX_DEFAULT_TIMEOUT = int(os.environ.get("BRAINLAYER_MLX_TIMEOUT", "60"))
 from ..paths import DEFAULT_DB_PATH
 
 # Supabase usage logging — track GLM calls even though they're free
@@ -393,7 +402,7 @@ def call_glm(prompt: str, timeout: int = 240) -> Optional[str]:
         return None
 
 
-def call_mlx(prompt: str, timeout: int = 240) -> Optional[str]:
+def call_mlx(prompt: str, timeout: int = MLX_DEFAULT_TIMEOUT) -> Optional[str]:
     """Call local MLX server via OpenAI-compatible API. Logs usage to Supabase."""
     try:
         start_ms = int(time.time() * 1000)
@@ -600,13 +609,12 @@ def _enrich_one(
 ) -> bool:
     """Enrich a single chunk. Returns True on success, False on failure.
 
+    Retries up to MAX_RETRIES times with exponential backoff + jitter on LLM failure.
+    This absorbs transient MLX crashes and connection blips without losing the chunk.
+
     Args:
         store_or_path: VectorStore instance (sequential) or Path (parallel, uses thread-local store).
         backend: Override backend for LLM calls.
-
-    Stall detection: if the LLM call takes longer than STALL_TIMEOUT, it's logged
-    as a stall. The requests timeout in call_llm/call_glm already handles HTTP-level
-    timeouts, but this adds observability at the enrichment layer.
     """
     # In parallel mode, each thread gets its own VectorStore connection.
     if isinstance(store_or_path, Path):
@@ -621,17 +629,34 @@ def _enrich_one(
 
     prompt = build_prompt(chunk, context_chunks)
 
-    chunk_start = time.time()
-    response = call_llm(prompt, backend=backend)
-    chunk_duration = time.time() - chunk_start
+    # Retry loop with exponential backoff + jitter
+    response = None
+    for attempt in range(1 + MAX_RETRIES):
+        chunk_start = time.time()
+        response = call_llm(prompt, backend=backend)
+        chunk_duration = time.time() - chunk_start
 
-    # Stall detection: log warning if chunk took too long
-    if chunk_duration > STALL_TIMEOUT:
-        print(
-            f"  STALL: chunk {chunk['id'][:12]} took {chunk_duration:.0f}s "
-            f"(threshold: {STALL_TIMEOUT}s, chars: {chunk.get('char_count', '?')})",
-            file=sys.stderr,
-        )
+        # Stall detection
+        if chunk_duration > STALL_TIMEOUT:
+            print(
+                f"  STALL: chunk {chunk['id'][:12]} took {chunk_duration:.0f}s "
+                f"(threshold: {STALL_TIMEOUT}s, chars: {chunk.get('char_count', '?')})",
+                file=sys.stderr,
+            )
+
+        if response is not None:
+            break
+
+        # LLM returned None — retry with backoff
+        if attempt < MAX_RETRIES:
+            delay = min(RETRY_BASE_DELAY * (2**attempt), RETRY_MAX_DELAY)
+            jitter = random.uniform(0, delay * 0.3)
+            total_delay = delay + jitter
+            print(
+                f"  RETRY: chunk {chunk['id'][:12]} attempt {attempt + 2}/{1 + MAX_RETRIES} in {total_delay:.1f}s",
+                file=sys.stderr,
+            )
+            time.sleep(total_delay)
 
     enrichment = parse_enrichment(response)
     if enrichment:
@@ -679,6 +704,10 @@ def enrich_batch(
 ) -> Dict[str, int]:
     """Process one batch of unenriched chunks. Returns counts.
 
+    Circuit breaker: if CIRCUIT_BREAKER_THRESHOLD consecutive chunks fail,
+    the batch is aborted early (backend is probably dead). This prevents
+    wasting hours of compute on connection-refused errors.
+
     Args:
         parallel: Number of concurrent workers (1=sequential, >1=ThreadPoolExecutor).
                   MLX server supports concurrent requests. Ollama may not benefit.
@@ -692,6 +721,8 @@ def enrich_batch(
 
     success = 0
     failed = 0
+    consecutive_failures = 0
+    circuit_broken = False
 
     batch_start = time.time()
     last_heartbeat = batch_start
@@ -706,11 +737,27 @@ def enrich_batch(
                 try:
                     if future.result():
                         success += 1
+                        consecutive_failures = 0
                     else:
                         failed += 1
+                        consecutive_failures += 1
                 except Exception as e:
                     print(f"  Worker error: {e}", file=sys.stderr)
                     failed += 1
+                    consecutive_failures += 1
+
+                # Circuit breaker: abort if backend is clearly dead
+                if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                    circuit_broken = True
+                    print(
+                        f"  CIRCUIT BREAK: {consecutive_failures} consecutive failures, "
+                        f"aborting batch ({success} ok, {failed} fail)",
+                        file=sys.stderr,
+                    )
+                    # Cancel remaining futures
+                    for f in futures:
+                        f.cancel()
+                    break
 
                 done = success + failed
                 now = time.time()
@@ -727,8 +774,20 @@ def enrich_batch(
 
             if ok:
                 success += 1
+                consecutive_failures = 0
             else:
                 failed += 1
+                consecutive_failures += 1
+
+            # Circuit breaker
+            if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:
+                circuit_broken = True
+                print(
+                    f"  CIRCUIT BREAK: {consecutive_failures} consecutive failures, "
+                    f"aborting batch ({success} ok, {failed} fail)",
+                    file=sys.stderr,
+                )
+                break
 
             done = success + failed
             now = time.time()
@@ -739,7 +798,12 @@ def enrich_batch(
                 )
                 last_heartbeat = now
 
-    return {"processed": len(chunks), "success": success, "failed": failed}
+    return {
+        "processed": success + failed,
+        "success": success,
+        "failed": failed,
+        "circuit_broken": circuit_broken,
+    }
 
 
 def mark_unenrichable(store: VectorStore) -> int:
@@ -857,6 +921,15 @@ def run_enrichment(
                 f"Batch done: +{result['success']} ok, +{result['failed']} fail | "
                 f"Total: {total_processed} ({rate:.1f}/s)"
             )
+
+            # Circuit breaker tripped — backend is dead, stop the run
+            if result.get("circuit_broken"):
+                print(
+                    "\nCircuit breaker tripped — stopping enrichment. "
+                    "Backend may be down. Check with: curl http://127.0.0.1:8080/v1/models",
+                    file=sys.stderr,
+                )
+                break
 
             # Sync stats to Supabase every 5 batches
             if total_processed % (batch_size * 5) < batch_size:
