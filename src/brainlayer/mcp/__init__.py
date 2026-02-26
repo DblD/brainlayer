@@ -683,7 +683,17 @@ Returns: Structured JSON with `chunk_id` (string) and `related[]` (similar exist
                     },
                     "type": {
                         "type": "string",
-                        "enum": ["idea", "mistake", "decision", "learning", "todo", "bookmark", "note", "journal", "issue"],
+                        "enum": [
+                            "idea",
+                            "mistake",
+                            "decision",
+                            "learning",
+                            "todo",
+                            "bookmark",
+                            "note",
+                            "journal",
+                            "issue",
+                        ],
                         "description": "Memory type. Auto-detected from content if omitted.",
                     },
                     "project": {

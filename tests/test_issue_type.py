@@ -107,10 +107,12 @@ class TestIssueMetadata:
             importance=8,
         )
         cursor = store.conn.cursor()
-        row = list(cursor.execute(
-            "SELECT metadata, tags, importance, content_type FROM chunks WHERE id = ?",
-            [result["id"]],
-        ))[0]
+        row = list(
+            cursor.execute(
+                "SELECT metadata, tags, importance, content_type FROM chunks WHERE id = ?",
+                [result["id"]],
+            )
+        )[0]
         meta = json.loads(row[0])
         assert meta["status"] == "in_progress"
         assert meta["severity"] == "high"
