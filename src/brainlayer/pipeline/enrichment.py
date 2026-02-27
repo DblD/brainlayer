@@ -877,9 +877,17 @@ def enrich_batch(
                         failed += 1
                         consecutive_failures += 1
                 except Exception as e:
-                    print(f"  Worker error: {e}", file=sys.stderr)
-                    failed += 1
-                    consecutive_failures += 1
+                    # DB lock errors are transient contention, not backend failures.
+                    # Don't count them toward circuit breaker.
+                    is_db_lock = "database is locked" in str(e) or "BusyError" in type(e).__name__
+                    if is_db_lock:
+                        print(f"  Worker DB lock (transient): {e}", file=sys.stderr)
+                        failed += 1
+                        # Don't increment consecutive_failures for DB locks
+                    else:
+                        print(f"  Worker error: {e}", file=sys.stderr)
+                        failed += 1
+                        consecutive_failures += 1
 
                 # Circuit breaker: abort if backend is clearly dead
                 if consecutive_failures >= CIRCUIT_BREAKER_THRESHOLD:

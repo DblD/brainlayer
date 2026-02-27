@@ -18,7 +18,7 @@ def _set_busy_timeout_hook(conn: apsw.Connection) -> None:
     the Connection() constructor. Without busy_timeout set first, this PRAGMA
     fails with BusyError when other processes hold the DB lock.
     """
-    conn.setbusytimeout(10_000)  # 10 seconds
+    conn.setbusytimeout(30_000)  # 30 seconds — needed for parallel enrichment workers + MCP
 
 
 # Register busy_timeout hook BEFORE bestpractice hooks so it fires first.
