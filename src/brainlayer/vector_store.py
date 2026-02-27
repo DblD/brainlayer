@@ -3054,6 +3054,143 @@ class VectorStore:
 
         return None
 
+    # ── KG Hybrid Retrieval ──────────────────────────────────────────
+
+    def kg_search(
+        self,
+        query: str,
+        relation_type: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Structured KG fact retrieval — find relations matching a query.
+
+        Resolves query to an entity, then returns its current (non-expired) facts.
+        If no exact entity match, searches relations by fact text via FTS-like matching.
+
+        Args:
+            query: Entity name or search text
+            relation_type: Optional filter by relation type
+            limit: Max results
+        """
+        results: List[Dict[str, Any]] = []
+
+        # Try to resolve query to an entity
+        entity = self.resolve_entity(query)
+        if entity:
+            # Get facts for this entity (both directions)
+            cursor = self._read_cursor()
+            params: list = [entity["id"]]
+            rel_filter = ""
+            if relation_type:
+                rel_filter = "AND r.relation_type = ?"
+                params.append(relation_type)
+            params.append(entity["id"])
+            if relation_type:
+                params.append(relation_type)
+            params.append(limit)
+
+            rows = list(
+                cursor.execute(
+                    f"""
+                    SELECT r.id, r.source_id, r.target_id, r.relation_type,
+                           r.fact, r.confidence, r.importance,
+                           r.source_chunk_id, r.properties,
+                           se.name as source_name, se.entity_type as source_type,
+                           te.name as target_name, te.entity_type as target_type
+                    FROM kg_current_facts r
+                    JOIN kg_entities se ON r.source_id = se.id
+                    JOIN kg_entities te ON r.target_id = te.id
+                    WHERE (r.source_id = ? {rel_filter})
+                       OR (r.target_id = ? {rel_filter})
+                    ORDER BY r.importance DESC, r.confidence DESC
+                    LIMIT ?
+                    """,
+                    params,
+                )
+            )
+
+            for row in rows:
+                results.append(
+                    {
+                        "id": row[0],
+                        "source_id": row[1],
+                        "target_id": row[2],
+                        "relation_type": row[3],
+                        "fact": row[4],
+                        "confidence": row[5],
+                        "importance": row[6],
+                        "source_chunk_id": row[7],
+                        "properties": json.loads(row[8]) if row[8] else {},
+                        "source_entity": {"name": row[9], "entity_type": row[10]},
+                        "target_entity": {"name": row[11], "entity_type": row[12]},
+                    }
+                )
+
+        return results
+
+    def kg_hybrid_search(
+        self,
+        query_embedding: List[float],
+        query_text: str,
+        n_results: int = 10,
+        entity_name: Optional[str] = None,
+        relation_type: Optional[str] = None,
+        project_filter: Optional[str] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        """Combined vector + KG fact retrieval with RRF scoring.
+
+        Returns:
+            {
+                "chunks": <standard hybrid_search result>,
+                "facts": [{"fact": ..., "rrf_score": ..., ...}]
+            }
+        """
+        RRF_K = 60  # RRF constant
+
+        # 1. Standard vector + FTS5 hybrid search on chunks
+        entity_id = None
+        if entity_name:
+            entity = self.resolve_entity(entity_name)
+            if entity:
+                entity_id = entity["id"]
+
+        chunk_results = self.hybrid_search(
+            query_embedding=query_embedding,
+            query_text=query_text,
+            n_results=n_results,
+            project_filter=project_filter,
+            entity_id=entity_id,
+            **kwargs,
+        )
+
+        # 2. KG fact search
+        search_term = entity_name or query_text
+        kg_facts = self.kg_search(
+            query=search_term,
+            relation_type=relation_type,
+            limit=n_results,
+        )
+
+        # 3. Score facts via RRF (rank by importance * confidence)
+        scored_facts = []
+        for rank, fact in enumerate(kg_facts):
+            rrf_score = 1.0 / (RRF_K + rank)
+            # Boost by importance and confidence
+            importance = fact.get("importance") or 0.5
+            confidence = fact.get("confidence") or 1.0
+            boosted_score = rrf_score * importance * confidence
+            fact["rrf_score"] = round(boosted_score, 6)
+            scored_facts.append(fact)
+
+        # Sort by score descending
+        scored_facts.sort(key=lambda f: f["rrf_score"], reverse=True)
+
+        return {
+            "chunks": chunk_results,
+            "facts": scored_facts,
+        }
+
     def close(self) -> None:
         """Close database connections."""
         if hasattr(self, "read_conn"):
