@@ -170,7 +170,9 @@ async def _brain_update(
             is_lock_error = isinstance(e, apsw.BusyError) or "locked" in str(e).lower() or "busy" in str(e).lower()
             if is_lock_error and attempt < _RETRY_MAX_ATTEMPTS - 1:
                 delay = _retry_delay * (2**attempt)
-                logger.warning("brain_update BusyError (attempt %d/%d), retrying in %.2fs", attempt + 1, _RETRY_MAX_ATTEMPTS, delay)
+                logger.warning(
+                    "brain_update BusyError (attempt %d/%d), retrying in %.2fs", attempt + 1, _RETRY_MAX_ATTEMPTS, delay
+                )
                 await asyncio.sleep(delay)
                 last_err = e
                 continue

@@ -260,7 +260,9 @@ async def _search(
         elif source:
             source_filter = source
         else:
-            source_filter = None  # AIDEV-NOTE: was "claude_code" — excluded brain_store ("manual") chunks. Default to all sources.
+            source_filter = (
+                None  # AIDEV-NOTE: was "claude_code" — excluded brain_store ("manual") chunks. Default to all sources.
+            )
 
         if entity_id and not source:
             source_filter = None
@@ -290,7 +292,9 @@ async def _search(
                 is_lock = isinstance(e, apsw.BusyError) or "locked" in str(e).lower() or "busy" in str(e).lower()
                 if is_lock and attempt < _RETRY_MAX_ATTEMPTS - 1:
                     delay = _retry_delay * (2**attempt)
-                    logger.warning("Search BusyError (attempt %d/%d), retrying in %.2fs", attempt + 1, _RETRY_MAX_ATTEMPTS, delay)
+                    logger.warning(
+                        "Search BusyError (attempt %d/%d), retrying in %.2fs", attempt + 1, _RETRY_MAX_ATTEMPTS, delay
+                    )
                     await asyncio.sleep(delay)
                     continue
                 raise  # Non-lock error or retries exhausted

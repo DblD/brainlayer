@@ -78,9 +78,7 @@ class TestFlushPendingStores:
     def test_flush_drains_queue(self, tmp_path):
         """Successful flush empties the JSONL file."""
         pending_path = tmp_path / "pending-stores.jsonl"
-        pending_path.write_text(
-            json.dumps({"content": "queued item", "memory_type": "note"}) + "\n"
-        )
+        pending_path.write_text(json.dumps({"content": "queued item", "memory_type": "note"}) + "\n")
 
         mock_store = MagicMock()
         mock_embed = MagicMock(return_value=[0.1] * 1024)
@@ -101,8 +99,10 @@ class TestFlushPendingStores:
         """Items that fail to flush are kept in the queue."""
         pending_path = tmp_path / "pending-stores.jsonl"
         pending_path.write_text(
-            json.dumps({"content": "good", "memory_type": "note"}) + "\n"
-            + json.dumps({"content": "bad", "memory_type": "note"}) + "\n"
+            json.dumps({"content": "good", "memory_type": "note"})
+            + "\n"
+            + json.dumps({"content": "bad", "memory_type": "note"})
+            + "\n"
         )
 
         call_count = 0
