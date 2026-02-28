@@ -166,7 +166,7 @@ async def _brain_update(
             else:
                 return _error_result(f"Unknown action: {action}. Use update, archive, or merge.")
 
-        except (apsw.BusyError, Exception) as e:
+        except Exception as e:
             is_lock_error = isinstance(e, apsw.BusyError) or "locked" in str(e).lower() or "busy" in str(e).lower()
             if is_lock_error and attempt < _RETRY_MAX_ATTEMPTS - 1:
                 delay = _retry_delay * (2**attempt)
@@ -200,12 +200,14 @@ def _queue_store(item: dict) -> None:
     with open(path, "a") as f:
         f.write(json.dumps(item) + "\n")
 
-    # Enforce max size — read, trim oldest, rewrite
+    # Enforce max size — read, trim oldest, atomic rewrite via tempfile
     try:
         lines = path.read_text().strip().splitlines()
         if len(lines) > _QUEUE_MAX_SIZE:
             trimmed = lines[-_QUEUE_MAX_SIZE:]
-            path.write_text("\n".join(trimmed) + "\n")
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("\n".join(trimmed) + "\n")
+            tmp.rename(path)  # atomic on POSIX
             logger.warning(
                 "Pending store queue trimmed: %d -> %d (dropped %d oldest)",
                 len(lines),

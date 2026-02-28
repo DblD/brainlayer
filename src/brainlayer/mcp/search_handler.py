@@ -288,7 +288,7 @@ async def _search(
                     entity_id=entity_id,
                 )
                 break
-            except (apsw.BusyError, Exception) as e:
+            except Exception as e:
                 is_lock = isinstance(e, apsw.BusyError) or "locked" in str(e).lower() or "busy" in str(e).lower()
                 if is_lock and attempt < _RETRY_MAX_ATTEMPTS - 1:
                     delay = _retry_delay * (2**attempt)

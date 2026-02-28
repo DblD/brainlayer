@@ -65,9 +65,12 @@ class TestQueueStore:
                 _queue_store({"content": f"item-{i}", "memory_type": "note"})
 
         lines = pending_path.read_text().strip().splitlines()
-        # Should be capped at 100, with oldest dropped
-        assert len(lines) <= 100
-        # The newest items should be kept
+        # Should be exactly 100, with oldest 5 dropped
+        assert len(lines) == 100
+        # First retained item should be item-5 (oldest 5 dropped)
+        first_item = json.loads(lines[0])
+        assert first_item["content"] == "item-5"
+        # Last item should be the newest
         last_item = json.loads(lines[-1])
         assert last_item["content"] == "item-104"
 
@@ -208,9 +211,13 @@ class TestBrainUpdateRetryOnLock:
         ):
             result = await _brain_update(action="archive", chunk_id="test-chunk-123")
 
-        # Should succeed after retries
+        # Should succeed after retries (2 BusyError + 1 success)
         assert call_count == 3
-        assert not isinstance(result, dict) or not result.get("isError")
+        # Result should be a list of TextContent (success), not a CallToolResult error
+        assert isinstance(result, list)
+        assert len(result) > 0
+        text = result[0].text
+        assert "archived" in text
 
     @pytest.mark.asyncio
     async def test_update_fails_after_max_retries(self):
