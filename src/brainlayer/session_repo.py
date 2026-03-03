@@ -51,10 +51,19 @@ class SessionMixin:
             cursor.execute(
                 f"""
             SELECT id, content, source_file, project, content_type,
-                   conversation_id, position, char_count
+                   conversation_id, position, char_count, source
             FROM chunks
             WHERE {" AND ".join(where)}
-            ORDER BY rowid DESC
+            ORDER BY
+                CASE source
+                    WHEN 'claude_code' THEN 0
+                    WHEN 'manual' THEN 0
+                    WHEN 'digest' THEN 1
+                    WHEN 'whatsapp' THEN 2
+                    WHEN 'youtube' THEN 3
+                    ELSE 1
+                END,
+                rowid DESC
             LIMIT ?
         """,
                 params,
@@ -71,6 +80,7 @@ class SessionMixin:
                 "conversation_id": row[5],
                 "position": row[6],
                 "char_count": row[7],
+                "source": row[8] if len(row) > 8 else None,
             }
             for row in results
         ]
