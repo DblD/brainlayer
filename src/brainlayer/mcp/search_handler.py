@@ -60,11 +60,13 @@ def _detect_entities(query: str, store: Any) -> list[dict]:
 
         for candidate in candidates:
             # Exact name match first (case-insensitive)
-            rows = list(cursor.execute(
-                """SELECT id, name, entity_type FROM kg_entities
+            rows = list(
+                cursor.execute(
+                    """SELECT id, name, entity_type FROM kg_entities
                    WHERE LOWER(name) = LOWER(?) LIMIT 1""",
-                (candidate,),
-            ))
+                    (candidate,),
+                )
+            )
             if rows:
                 eid, name, etype = rows[0]
                 if eid not in seen_ids:
@@ -74,17 +76,20 @@ def _detect_entities(query: str, store: Any) -> list[dict]:
 
             # FTS fallback — fuzzy match on entity names
             from .._helpers import _escape_fts5_query
+
             fts_q = _escape_fts5_query(candidate)
             if not fts_q.strip():
                 continue
-            rows = list(cursor.execute(
-                """SELECT e.id, e.name, e.entity_type
+            rows = list(
+                cursor.execute(
+                    """SELECT e.id, e.name, e.entity_type
                    FROM kg_entities_fts f
                    JOIN kg_entities e ON f.entity_id = e.id
                    WHERE kg_entities_fts MATCH ?
                    ORDER BY f.rank LIMIT 1""",
-                (fts_q,),
-            ))
+                    (fts_q,),
+                )
+            )
             if rows:
                 eid, name, etype = rows[0]
                 if eid not in seen_ids:
@@ -246,16 +251,18 @@ async def _brain_search(
                 ):
                     score = 1 - dist if dist is not None else 0
                     if detail == "compact":
-                        item = _build_compact_result({
-                            "score": round(score, 4),
-                            "chunk_id": cid,
-                            "project": _normalize_project_name(meta.get("project")) or "unknown",
-                            "content": doc,
-                            "source_file": meta.get("source_file", "unknown"),
-                            "date": meta.get("created_at", "")[:10] if meta.get("created_at") else None,
-                            "importance": meta.get("importance"),
-                            "summary": meta.get("summary"),
-                        })
+                        item = _build_compact_result(
+                            {
+                                "score": round(score, 4),
+                                "chunk_id": cid,
+                                "project": _normalize_project_name(meta.get("project")) or "unknown",
+                                "content": doc,
+                                "source_file": meta.get("source_file", "unknown"),
+                                "date": meta.get("created_at", "")[:10] if meta.get("created_at") else None,
+                                "importance": meta.get("importance"),
+                                "summary": meta.get("summary"),
+                            }
+                        )
                     else:
                         item = {
                             "score": round(score, 4),
@@ -268,12 +275,14 @@ async def _brain_search(
             # Add KG facts
             fact_items = []
             for fact in facts[:5]:
-                fact_items.append({
-                    "relation": fact.get("relation_type", ""),
-                    "source": fact.get("source_entity", {}).get("name", ""),
-                    "target": fact.get("target_entity", {}).get("name", ""),
-                    "score": fact.get("rrf_score", 0),
-                })
+                fact_items.append(
+                    {
+                        "relation": fact.get("relation_type", ""),
+                        "source": fact.get("source_entity", {}).get("name", ""),
+                        "target": fact.get("target_entity", {}).get("name", ""),
+                        "score": fact.get("rrf_score", 0),
+                    }
+                )
 
             structured = {
                 "query": query,
