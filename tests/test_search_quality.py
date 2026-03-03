@@ -9,15 +9,11 @@ All tests use tmp_path fixtures (isolated, no production DB).
 """
 
 import json
-import math
-from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from brainlayer.vector_store import VectorStore
-
 
 # ── Fixtures ────────────────────────────────────────────────────
 
@@ -42,9 +38,19 @@ def mock_embed():
     return _embed
 
 
-def _insert_chunk(store, chunk_id, content, summary=None, tags=None,
-                  resolved_query=None, importance=None, created_at=None,
-                  project=None, source="claude_code", embedding=None):
+def _insert_chunk(
+    store,
+    chunk_id,
+    content,
+    summary=None,
+    tags=None,
+    resolved_query=None,
+    importance=None,
+    created_at=None,
+    project=None,
+    source="claude_code",
+    embedding=None,
+):
     """Helper: insert a chunk with enrichment metadata into the store."""
     if embedding is None:
         seed = sum(ord(c) for c in chunk_id[:20]) % 100
@@ -56,11 +62,21 @@ def _insert_chunk(store, chunk_id, content, summary=None, tags=None,
            content_type, char_count, source, summary, tags, resolved_query,
            importance, created_at)
            VALUES (?, ?, '{}', 'test.jsonl', ?, 'assistant_text', ?, ?, ?, ?, ?, ?, ?)""",
-        (chunk_id, content, project, len(content), source,
-         summary, json.dumps(tags) if tags else None, resolved_query,
-         importance, created_at),
+        (
+            chunk_id,
+            content,
+            project,
+            len(content),
+            source,
+            summary,
+            json.dumps(tags) if tags else None,
+            resolved_query,
+            importance,
+            created_at,
+        ),
     )
     from brainlayer._helpers import serialize_f32
+
     cursor.execute(
         "INSERT INTO chunk_vectors (chunk_id, embedding) VALUES (?, ?)",
         (chunk_id, serialize_f32(embedding)),
@@ -76,7 +92,6 @@ class TestFormatBug:
     def test_default_search_uses_detail_param(self):
         """search_handler._brain_search default path passes detail correctly."""
         import ast
-        from pathlib import Path
 
         handler_path = Path(__file__).parent.parent / "src" / "brainlayer" / "mcp" / "search_handler.py"
         source = handler_path.read_text()
@@ -118,7 +133,8 @@ class TestFTS5Expansion:
     def test_fts5_search_matches_summary(self, store, mock_embed):
         """FTS5 keyword search finds chunks by their summary text."""
         _insert_chunk(
-            store, "chunk-summary-1",
+            store,
+            "chunk-summary-1",
             content="Some generic code implementation details.",
             summary="Voice calibration for coachClaude scheduling agent",
             tags=["voice", "coach"],
@@ -134,7 +150,8 @@ class TestFTS5Expansion:
     def test_fts5_search_matches_tags(self, store, mock_embed):
         """FTS5 keyword search finds chunks by their tags."""
         _insert_chunk(
-            store, "chunk-tags-1",
+            store,
+            "chunk-tags-1",
             content="Implemented the new scheduling feature.",
             tags=["authentication", "jwt-tokens", "security"],
         )
@@ -149,7 +166,8 @@ class TestFTS5Expansion:
     def test_fts5_search_matches_resolved_query(self, store, mock_embed):
         """FTS5 keyword search finds chunks by their resolved_query."""
         _insert_chunk(
-            store, "chunk-rq-1",
+            store,
+            "chunk-rq-1",
             content="Here is how the auth flow works internally.",
             resolved_query="how does authentication work in the golems monorepo",
         )
@@ -164,17 +182,20 @@ class TestFTS5Expansion:
     def test_fts5_insert_trigger_syncs_enrichment(self, store):
         """INSERT trigger populates FTS5 with summary/tags/resolved_query."""
         _insert_chunk(
-            store, "chunk-trigger-1",
+            store,
+            "chunk-trigger-1",
             content="test content",
             summary="test summary for trigger",
             tags=["trigger-test"],
             resolved_query="trigger test query",
         )
         cursor = store.conn.cursor()
-        rows = list(cursor.execute(
-            "SELECT summary, tags, resolved_query FROM chunks_fts WHERE chunk_id = ?",
-            ("chunk-trigger-1",),
-        ))
+        rows = list(
+            cursor.execute(
+                "SELECT summary, tags, resolved_query FROM chunks_fts WHERE chunk_id = ?",
+                ("chunk-trigger-1",),
+            )
+        )
         assert len(rows) == 1
         assert rows[0][0] == "test summary for trigger"
         assert "trigger-test" in rows[0][1]
@@ -188,10 +209,12 @@ class TestFTS5Expansion:
             "UPDATE chunks SET summary = ?, tags = ? WHERE id = ?",
             ("updated summary", '["updated-tag"]', "chunk-update-1"),
         )
-        rows = list(cursor.execute(
-            "SELECT summary FROM chunks_fts WHERE chunk_id = ?",
-            ("chunk-update-1",),
-        ))
+        rows = list(
+            cursor.execute(
+                "SELECT summary FROM chunks_fts WHERE chunk_id = ?",
+                ("chunk-update-1",),
+            )
+        )
         assert len(rows) == 1
         assert rows[0][0] == "updated summary"
 
@@ -207,7 +230,8 @@ class TestPostRRFReranking:
         # Insert two chunks with similar content but different importance
         emb = mock_embed("database optimization patterns")
         _insert_chunk(
-            store, "low-imp",
+            store,
+            "low-imp",
             content="database optimization patterns discussion",
             importance=2.0,
             created_at="2026-03-01T00:00:00",
@@ -216,7 +240,8 @@ class TestPostRRFReranking:
         # Slightly different embedding for the high-importance one
         emb_hi = [v + 0.001 for v in emb]
         _insert_chunk(
-            store, "high-imp",
+            store,
+            "high-imp",
             content="database optimization patterns and best practices",
             importance=9.0,
             created_at="2026-03-01T00:00:00",
@@ -236,7 +261,8 @@ class TestPostRRFReranking:
         """A recent chunk should rank above an old chunk at similar distance."""
         emb = mock_embed("authentication flow")
         _insert_chunk(
-            store, "old-chunk",
+            store,
+            "old-chunk",
             content="authentication flow implementation details",
             importance=5.0,
             created_at="2025-06-01T00:00:00",  # 9 months ago
@@ -244,7 +270,8 @@ class TestPostRRFReranking:
         )
         emb_new = [v + 0.001 for v in emb]
         _insert_chunk(
-            store, "new-chunk",
+            store,
+            "new-chunk",
             content="authentication flow implementation and testing",
             importance=5.0,
             created_at="2026-03-02T00:00:00",  # yesterday
@@ -263,7 +290,8 @@ class TestPostRRFReranking:
         """Chunks without importance metadata should still rank without errors."""
         emb = mock_embed("test query")
         _insert_chunk(
-            store, "no-imp",
+            store,
+            "no-imp",
             content="test content without importance",
             importance=None,
             created_at="2026-03-01T00:00:00",
@@ -280,7 +308,8 @@ class TestPostRRFReranking:
         """Chunks without created_at should still rank without errors."""
         emb = mock_embed("another test")
         _insert_chunk(
-            store, "no-date",
+            store,
+            "no-date",
             content="test content without date",
             importance=5.0,
             created_at=None,
@@ -316,6 +345,7 @@ class TestEntityAwareRouting:
         )
 
         from brainlayer.mcp.search_handler import _detect_entities
+
         entities = _detect_entities("What does Avi Simon prefer for meetings?", store)
         assert len(entities) >= 1
         assert any(e["name"].lower() == "avi simon" for e in entities)
@@ -323,6 +353,7 @@ class TestEntityAwareRouting:
     def test_entity_detection_returns_empty_for_no_match(self, store):
         """When no entity names match, return empty list."""
         from brainlayer.mcp.search_handler import _detect_entities
+
         entities = _detect_entities("how to implement authentication", store)
         assert entities == []
 
@@ -341,7 +372,8 @@ class TestEntityAwareRouting:
         )
         # Insert a chunk linked to this entity
         _insert_chunk(
-            store, "ent-chunk-1",
+            store,
+            "ent-chunk-1",
             content="Michal Cohen prefers morning meetings before 10am",
             importance=7.0,
             created_at="2026-03-01T00:00:00",

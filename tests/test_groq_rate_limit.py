@@ -5,9 +5,7 @@ under the free tier rate limit (~30 req/min).
 """
 
 import time
-from unittest.mock import patch, MagicMock
-
-import pytest
+from unittest.mock import MagicMock, patch
 
 
 class TestGroqRateLimiting:
@@ -16,9 +14,8 @@ class TestGroqRateLimiting:
     def test_groq_calls_have_minimum_delay(self):
         """Sequential Groq enrichment calls should have at least GROQ_RATE_LIMIT_DELAY between them."""
         from brainlayer.pipeline.enrichment import GROQ_RATE_LIMIT_DELAY
-        assert GROQ_RATE_LIMIT_DELAY >= 2.0, (
-            f"GROQ_RATE_LIMIT_DELAY should be >= 2.0s, got {GROQ_RATE_LIMIT_DELAY}"
-        )
+
+        assert GROQ_RATE_LIMIT_DELAY >= 2.0, f"GROQ_RATE_LIMIT_DELAY should be >= 2.0s, got {GROQ_RATE_LIMIT_DELAY}"
 
     def test_call_groq_sleeps_between_calls(self):
         """call_groq should enforce minimum delay between consecutive calls."""
@@ -37,9 +34,11 @@ class TestGroqRateLimiting:
             resp.raise_for_status = MagicMock()
             return resp
 
-        with patch("brainlayer.pipeline.enrichment.requests.post", side_effect=fake_post), \
-             patch("brainlayer.pipeline.enrichment._log_glm_usage"), \
-             patch("brainlayer.pipeline.enrichment.GROQ_API_KEY", "fake-key"):
+        with (
+            patch("brainlayer.pipeline.enrichment.requests.post", side_effect=fake_post),
+            patch("brainlayer.pipeline.enrichment._log_glm_usage"),
+            patch("brainlayer.pipeline.enrichment.GROQ_API_KEY", "fake-key"),
+        ):
             enrichment.call_groq("prompt 1")
             enrichment.call_groq("prompt 2")
             enrichment.call_groq("prompt 3")
@@ -49,20 +48,16 @@ class TestGroqRateLimiting:
         for i in range(1, len(call_times)):
             gap = call_times[i] - call_times[i - 1]
             # Allow some tolerance (sleep isn't perfectly precise)
-            assert gap >= 1.5, (
-                f"Gap between call {i} and {i+1} was {gap:.2f}s, expected >= 1.5s"
-            )
+            assert gap >= 1.5, f"Gap between call {i} and {i + 1} was {gap:.2f}s, expected >= 1.5s"
 
     def test_rate_limit_delay_env_override(self):
         """BRAINLAYER_GROQ_RATE_DELAY env var should override the default delay."""
         import os
-        from importlib import reload
 
         original = os.environ.get("BRAINLAYER_GROQ_RATE_DELAY")
         try:
             os.environ["BRAINLAYER_GROQ_RATE_DELAY"] = "5.0"
             # Need to reload to pick up env var
-            from brainlayer.pipeline import enrichment
             # Check the module-level constant respects the env var
             # (This tests the env var mechanism, not the reloaded value)
             assert float(os.environ["BRAINLAYER_GROQ_RATE_DELAY"]) == 5.0
@@ -78,10 +73,11 @@ class TestEnrichmentSourcePriority:
 
     def test_get_unenriched_prioritizes_claude_code(self):
         """get_unenriched_chunks should return Claude Code chunks before YouTube."""
+        import tempfile
         from pathlib import Path
+
         from brainlayer.vector_store import VectorStore
 
-        import tempfile
         with tempfile.TemporaryDirectory() as tmpdir:
             store = VectorStore(Path(tmpdir) / "test.db")
             cursor = store.conn.cursor()
@@ -109,7 +105,5 @@ class TestEnrichmentSourcePriority:
             if "claude_code" in sources and "youtube" in sources:
                 cc_idx = sources.index("claude_code")
                 yt_idx = sources.index("youtube")
-                assert cc_idx < yt_idx, (
-                    f"Claude Code (idx={cc_idx}) should rank before YouTube (idx={yt_idx})"
-                )
+                assert cc_idx < yt_idx, f"Claude Code (idx={cc_idx}) should rank before YouTube (idx={yt_idx})"
             store.close()
