@@ -134,7 +134,12 @@ def print_stats(store: VectorStore):
 
 
 def fix_entity_types(store: VectorStore, dry_run: bool = True) -> int:
-    """Fix known entity type misclassifications."""
+    """Fix known entity type misclassifications.
+
+    If the target (entity_type, name) already exists, merges: transfers chunk
+    links and relations from the old entity to the existing one, then deletes
+    the old entity.
+    """
     cursor = store._read_cursor()
     fixed = 0
 
@@ -143,16 +148,49 @@ def fix_entity_types(store: VectorStore, dry_run: bool = True) -> int:
         if not rows:
             continue
 
-        entity_id = rows[0][0]
-        if dry_run:
-            logger.info("[DRY-RUN] Would retype %s (%s → %s)", name, old_type, new_type)
+        old_id = rows[0][0]
+
+        # Check if target (type, name) already exists → merge
+        target_rows = list(
+            cursor.execute("SELECT id FROM kg_entities WHERE entity_type = ? AND name = ?", (new_type, name))
+        )
+
+        if target_rows:
+            target_id = target_rows[0][0]
+            if dry_run:
+                logger.info("[DRY-RUN] Would merge %s (%s/%s → %s/%s)", name, old_type, old_id, new_type, target_id)
+            else:
+                write_cursor = store.conn.cursor()
+                # Transfer chunk links
+                write_cursor.execute(
+                    "UPDATE OR IGNORE kg_entity_chunks SET entity_id = ? WHERE entity_id = ?",
+                    (target_id, old_id),
+                )
+                # Delete remaining duplicates
+                write_cursor.execute("DELETE FROM kg_entity_chunks WHERE entity_id = ?", (old_id,))
+                # Transfer relations (source)
+                write_cursor.execute(
+                    "UPDATE kg_relations SET source_id = ? WHERE source_id = ?",
+                    (target_id, old_id),
+                )
+                # Transfer relations (target)
+                write_cursor.execute(
+                    "UPDATE kg_relations SET target_id = ? WHERE target_id = ?",
+                    (target_id, old_id),
+                )
+                # Delete old entity
+                write_cursor.execute("DELETE FROM kg_entities WHERE id = ?", (old_id,))
+                logger.info("Merged %s (%s/%s → %s/%s)", name, old_type, old_id, new_type, target_id)
         else:
-            write_cursor = store.conn.cursor()
-            write_cursor.execute(
-                "UPDATE kg_entities SET entity_type = ?, updated_at = datetime('now') WHERE id = ?",
-                (new_type, entity_id),
-            )
-            logger.info("Retyped %s (%s → %s)", name, old_type, new_type)
+            if dry_run:
+                logger.info("[DRY-RUN] Would retype %s (%s → %s)", name, old_type, new_type)
+            else:
+                write_cursor = store.conn.cursor()
+                write_cursor.execute(
+                    "UPDATE kg_entities SET entity_type = ?, updated_at = datetime('now') WHERE id = ?",
+                    (new_type, old_id),
+                )
+                logger.info("Retyped %s (%s → %s)", name, old_type, new_type)
         fixed += 1
 
     return fixed
