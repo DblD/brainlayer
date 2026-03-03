@@ -1,7 +1,9 @@
 """Search and retrieval methods for VectorStore (mixin)."""
 
 import json
+import math
 import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ._helpers import _escape_fts5_query, serialize_f32
@@ -537,7 +539,32 @@ class SearchMixin:
 
             scored.append((score, cid, doc, meta, dist))
 
-        # Sort by RRF score descending
+        # Post-RRF boost: importance and recency adjustments
+        now = datetime.now(timezone.utc)
+        for i, (score, cid, doc, meta, dist) in enumerate(scored):
+            boost = 1.0
+
+            # Importance boost: scale 0-10 → 1.0-1.5x multiplier
+            imp = meta.get("importance")
+            if imp is not None and isinstance(imp, (int, float)):
+                boost *= 1.0 + min(max(float(imp), 0), 10) / 20.0  # 10/20 = 0.5 max boost
+
+            # Recency boost: exponential decay with 30-day half-life
+            created = meta.get("created_at")
+            if created and isinstance(created, str):
+                try:
+                    dt = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    age_days = max((now - dt).total_seconds() / 86400, 0)
+                    recency = math.exp(-0.023 * age_days)  # ~0.5 at 30 days
+                    boost *= 0.7 + 0.3 * recency  # range: 0.7x (old) to 1.0x (fresh)
+                except (ValueError, TypeError):
+                    pass
+
+            scored[i] = (score * boost, cid, doc, meta, dist)
+
+        # Sort by boosted RRF score descending
         scored.sort(key=lambda x: x[0], reverse=True)
 
         ids = [s[1] for s in scored[:n_results]]

@@ -183,28 +183,53 @@ class VectorStore(SearchMixin, KGMixin, SessionMixin):
             )
         """)
 
-        # FTS5 full-text search
-        cursor.execute("""
+        # FTS5 full-text search — indexes content + enrichment metadata
+        # for better keyword matches on summaries, tags, and resolved queries.
+        _FTS5_COLUMNS = "content, summary, tags, resolved_query, chunk_id UNINDEXED"
+
+        # Detect old single-column FTS5 schema and rebuild if needed.
+        # FTS5 virtual tables can't be ALTERed — must drop and recreate.
+        _needs_fts_rebuild = False
+        try:
+            fts_cols = {row[1] for row in cursor.execute("PRAGMA table_info(chunks_fts)")}
+            if fts_cols and "summary" not in fts_cols:
+                _needs_fts_rebuild = True
+        except Exception:
+            pass  # Table doesn't exist yet, will be created below
+
+        if _needs_fts_rebuild:
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_insert")
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_delete")
+            cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_update")
+            cursor.execute("DROP TABLE IF EXISTS chunks_fts")
+
+        cursor.execute(f"""
             CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
-                content, chunk_id UNINDEXED
+                {_FTS5_COLUMNS}
             )
         """)
 
-        # FTS5 sync triggers
+        # FTS5 sync triggers — keep summary/tags/resolved_query in sync
+        cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_insert")
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-                INSERT INTO chunks_fts(content, chunk_id) VALUES (new.content, new.id);
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                VALUES (new.content, new.summary, new.tags, new.resolved_query, new.id);
             END
         """)
+        cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_delete")
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
                 DELETE FROM chunks_fts WHERE chunk_id = old.id;
             END
         """)
+        cursor.execute("DROP TRIGGER IF EXISTS chunks_fts_update")
         cursor.execute("""
-            CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE OF content ON chunks BEGIN
+            CREATE TRIGGER IF NOT EXISTS chunks_fts_update
+            AFTER UPDATE OF content, summary, tags, resolved_query ON chunks BEGIN
                 DELETE FROM chunks_fts WHERE chunk_id = old.id;
-                INSERT INTO chunks_fts(content, chunk_id) VALUES (new.content, new.id);
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                VALUES (new.content, new.summary, new.tags, new.resolved_query, new.id);
             END
         """)
 
@@ -491,13 +516,13 @@ class VectorStore(SearchMixin, KGMixin, SessionMixin):
               AND expired_at IS NULL
         """)
 
-        # FTS5 backfill check
+        # FTS5 backfill check — populate from chunks if FTS is empty (fresh rebuild or first run)
         fts_count = list(cursor.execute("SELECT COUNT(*) FROM chunks_fts"))[0][0]
         chunk_count = list(cursor.execute("SELECT COUNT(*) FROM chunks"))[0][0]
         if chunk_count > 0 and fts_count == 0:
             cursor.execute("""
-                INSERT INTO chunks_fts(content, chunk_id)
-                SELECT content, id FROM chunks
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                SELECT content, summary, tags, resolved_query, id FROM chunks
             """)
 
         # Thread-local storage for per-thread read connections.

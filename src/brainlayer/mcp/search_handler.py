@@ -1,6 +1,7 @@
 """Search and recall MCP handlers."""
 
 import asyncio
+from typing import Any
 
 import apsw
 from mcp.types import TextContent
@@ -23,6 +24,82 @@ from ._shared import (
     _query_signals_think,
     logger,
 )
+
+
+def _detect_entities(query: str, store: Any) -> list[dict]:
+    """Detect known KG entity names in a query string.
+
+    Checks bigrams and individual capitalized words against kg_entities_fts.
+    Returns list of matched entities with id, name, entity_type.
+    """
+    if not query or len(query) < 2:
+        return []
+
+    words = query.split()
+    candidates: list[str] = []
+
+    # Generate bigrams (most entity names are 2 words: "Avi Simon", "Michal Cohen")
+    for i in range(len(words) - 1):
+        bigram = f"{words[i]} {words[i + 1]}"
+        # Only check bigrams where at least one word is capitalized or all-caps
+        if words[i][0].isupper() or words[i + 1][0].isupper():
+            candidates.append(bigram)
+
+    # Single capitalized words (3+ chars to avoid false positives on "I", "A", etc.)
+    for w in words:
+        if len(w) >= 3 and w[0].isupper() and not w.isupper():
+            candidates.append(w)
+
+    if not candidates:
+        return []
+
+    try:
+        cursor = store._read_cursor()
+        matched = []
+        seen_ids: set[str] = set()
+
+        for candidate in candidates:
+            # Exact name match first (case-insensitive)
+            rows = list(
+                cursor.execute(
+                    """SELECT id, name, entity_type FROM kg_entities
+                   WHERE LOWER(name) = LOWER(?) LIMIT 1""",
+                    (candidate,),
+                )
+            )
+            if rows:
+                eid, name, etype = rows[0]
+                if eid not in seen_ids:
+                    seen_ids.add(eid)
+                    matched.append({"id": eid, "name": name, "entity_type": etype})
+                continue
+
+            # FTS fallback — fuzzy match on entity names
+            from .._helpers import _escape_fts5_query
+
+            fts_q = _escape_fts5_query(candidate)
+            if not fts_q.strip():
+                continue
+            rows = list(
+                cursor.execute(
+                    """SELECT e.id, e.name, e.entity_type
+                   FROM kg_entities_fts f
+                   JOIN kg_entities e ON f.entity_id = e.id
+                   WHERE kg_entities_fts MATCH ?
+                   ORDER BY f.rank LIMIT 1""",
+                    (fts_q,),
+                )
+            )
+            if rows:
+                eid, name, etype = rows[0]
+                if eid not in seen_ids:
+                    seen_ids.add(eid)
+                    matched.append({"id": eid, "name": name, "entity_type": etype})
+
+        return matched
+    except Exception as e:
+        logger.debug("Entity detection failed: %s", e)
+        return []
 
 
 async def _brain_search(
@@ -138,6 +215,89 @@ async def _brain_search(
     if _query_signals_recall(query):
         return await _recall(topic=query, project=project, max_results=max_results)
 
+    # Entity-aware routing: detect known entity names in query and route to
+    # kg_hybrid_search for combined chunk + KG fact retrieval.
+    # Skip entity routing when additional filters are active — kg_hybrid_search
+    # doesn't support them and we'd silently drop the user's filter intent.
+    has_active_filters = any([content_type, source, tag, intent, importance_min, date_from, date_to, sentiment])
+    store = _get_vector_store()
+    detected_entities = _detect_entities(query, store) if not has_active_filters else []
+    if detected_entities:
+        try:
+            entity_name = detected_entities[0]["name"]
+            normalized_project = _normalize_project_name(project)
+            loop = asyncio.get_running_loop()
+            model = _get_embedding_model()
+            query_embedding = await loop.run_in_executor(None, model.embed_query, query)
+
+            kg_results = store.kg_hybrid_search(
+                query_embedding=query_embedding,
+                query_text=query,
+                n_results=num_results,
+                entity_name=entity_name,
+                project_filter=normalized_project,
+            )
+            # Format KG hybrid results: chunks + facts
+            chunk_results = kg_results.get("chunks", {})
+            facts = kg_results.get("facts", [])
+
+            output_parts = [f"## Entity Search: {entity_name}\n"]
+            structured_results = []
+
+            # Process chunk results (same format as regular hybrid_search)
+            if chunk_results.get("ids") and chunk_results["ids"][0]:
+                for cid, doc, meta, dist in zip(
+                    chunk_results["ids"][0],
+                    chunk_results["documents"][0],
+                    chunk_results["metadatas"][0],
+                    chunk_results["distances"][0],
+                ):
+                    score = 1 - dist if dist is not None else 0
+                    if detail == "compact":
+                        item = _build_compact_result(
+                            {
+                                "score": round(score, 4),
+                                "chunk_id": cid,
+                                "project": _normalize_project_name(meta.get("project")) or "unknown",
+                                "content": doc,
+                                "source_file": meta.get("source_file", "unknown"),
+                                "date": meta.get("created_at", "")[:10] if meta.get("created_at") else None,
+                                "importance": meta.get("importance"),
+                                "summary": meta.get("summary"),
+                            }
+                        )
+                    else:
+                        item = {
+                            "score": round(score, 4),
+                            "chunk_id": cid,
+                            "content": doc[:1000],
+                            "entity": entity_name,
+                        }
+                    structured_results.append(item)
+
+            # Add KG facts
+            fact_items = []
+            for fact in facts[:5]:
+                fact_items.append(
+                    {
+                        "relation": fact.get("relation_type", ""),
+                        "source": fact.get("source_entity", {}).get("name", ""),
+                        "target": fact.get("target_entity", {}).get("name", ""),
+                        "score": fact.get("rrf_score", 0),
+                    }
+                )
+
+            structured = {
+                "query": query,
+                "entity": entity_name,
+                "total": len(structured_results),
+                "results": structured_results,
+                "facts": fact_items,
+            }
+            return ([], structured)
+        except Exception as e:
+            logger.debug("Entity-aware search failed, falling back to default: %s", e)
+
     return await _search(
         query=query,
         project=project,
@@ -150,7 +310,7 @@ async def _brain_search(
         date_from=date_from,
         date_to=date_to,
         sentiment=sentiment,
-        format=format,
+        detail=detail,
     )
 
 
