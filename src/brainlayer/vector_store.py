@@ -283,9 +283,7 @@ class VectorStore(SearchMixin, KGMixin, SessionMixin):
         tagged_chunks = cursor.execute(
             "SELECT COUNT(*) FROM chunks WHERE tags IS NOT NULL AND json_valid(tags) = 1"
         ).fetchone()[0]
-        backfilled_chunks = cursor.execute(
-            "SELECT COUNT(DISTINCT chunk_id) FROM chunk_tags"
-        ).fetchone()[0]
+        backfilled_chunks = cursor.execute("SELECT COUNT(DISTINCT chunk_id) FROM chunk_tags").fetchone()[0]
         if tagged_chunks > 0 and backfilled_chunks < tagged_chunks:
             cursor.execute("""
                 INSERT OR IGNORE INTO chunk_tags(chunk_id, tag)

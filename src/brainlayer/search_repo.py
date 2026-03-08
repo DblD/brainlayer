@@ -65,9 +65,7 @@ class SearchMixin:
                 where_clauses.append("c.language = ?")
                 filter_params.append(language_filter)
             if tag_filter:
-                where_clauses.append(
-                    "c.id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)"
-                )
+                where_clauses.append("c.id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)")
                 filter_params.append(tag_filter)
             if intent_filter:
                 where_clauses.append("c.intent = ?")
@@ -134,9 +132,7 @@ class SearchMixin:
                 where_clauses.append("language = ?")
                 params.append(language_filter)
             if tag_filter:
-                where_clauses.append(
-                    "id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)"
-                )
+                where_clauses.append("id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)")
                 params.append(tag_filter)
             if intent_filter:
                 where_clauses.append("intent = ?")
@@ -402,9 +398,7 @@ class SearchMixin:
             fts_extra.append("AND c.source = ?")
             fts_params.append(source_filter)
         if tag_filter:
-            fts_extra.append(
-                "AND c.id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)"
-            )
+            fts_extra.append("AND c.id IN (SELECT chunk_id FROM chunk_tags WHERE tag = ?)")
             fts_params.append(tag_filter)
         if intent_filter:
             fts_extra.append("AND c.intent = ?")
