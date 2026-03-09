@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
-# Install BrainLayer launchd plists for auto-indexing and enrichment.
+# Install BrainLayer launchd plists for auto-indexing, enrichment, and WAL checkpoint.
 #
 # Usage:
-#   ./scripts/launchd/install.sh          # Install both
-#   ./scripts/launchd/install.sh index    # Install indexing only
-#   ./scripts/launchd/install.sh enrich   # Install enrichment only
-#   ./scripts/launchd/install.sh remove   # Unload and remove all
+#   ./scripts/launchd/install.sh              # Install all
+#   ./scripts/launchd/install.sh index        # Install indexing only
+#   ./scripts/launchd/install.sh enrich       # Install enrichment only
+#   ./scripts/launchd/install.sh checkpoint   # Install WAL checkpoint only
+#   ./scripts/launchd/install.sh remove       # Unload and remove all
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 LAUNCH_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/.local/share/brainlayer/logs"
+BRAINLAYER_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 BRAINLAYER_BIN="${BRAINLAYER_BIN:-$(which brainlayer 2>/dev/null || echo "$HOME/.local/bin/brainlayer")}"
+PYTHON3="${PYTHON3:-$(which python3 2>/dev/null || echo "/usr/bin/python3")}"
 
 if [ ! -x "$BRAINLAYER_BIN" ]; then
     echo "ERROR: brainlayer binary not found at $BRAINLAYER_BIN"
@@ -36,6 +39,8 @@ install_plist() {
     sed \
         -e "s|__HOME__|$HOME|g" \
         -e "s|__BRAINLAYER_BIN__|$BRAINLAYER_BIN|g" \
+        -e "s|__BRAINLAYER_DIR__|$BRAINLAYER_DIR|g" \
+        -e "s|__PYTHON3__|$PYTHON3|g" \
         "$src" > "$dst"
 
     echo "Installed: $dst"
@@ -63,16 +68,21 @@ case "${1:-all}" in
     enrich)
         install_plist enrich
         ;;
+    checkpoint)
+        install_plist wal-checkpoint
+        ;;
     all)
         install_plist index
         install_plist enrich
+        install_plist wal-checkpoint
         ;;
     remove)
         remove_plist index
         remove_plist enrich
+        remove_plist wal-checkpoint
         ;;
     *)
-        echo "Usage: $0 [index|enrich|all|remove]"
+        echo "Usage: $0 [index|enrich|checkpoint|all|remove]"
         exit 1
         ;;
 esac
