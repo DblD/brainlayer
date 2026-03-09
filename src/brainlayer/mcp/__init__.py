@@ -52,6 +52,7 @@ from .search_handler import (
     _think,
 )
 from .store_handler import _brain_digest, _brain_update, _store, _store_new
+from .tags_handler import _brain_tags_mcp
 
 # MCP query timeout prevents indefinite hangs when DB is locked by enrichment.
 MCP_QUERY_TIMEOUT = 15  # seconds — fail fast, return error instead of hanging
@@ -741,6 +742,49 @@ Returns: Structured JSON with action taken and affected chunk IDs.""",
                 "required": ["action", "chunk_id"],
             },
         ),
+        Tool(
+            name="brain_tags",
+            title="Tag Discovery",
+            description="""Discover and explore tags across your knowledge base.
+
+Actions:
+- **list**: Return top tags ordered by frequency (most-used first). Optional project filter.
+- **search**: Find tags matching a prefix or pattern (case-insensitive). Useful for autocomplete.
+- **suggest**: Suggest relevant existing tags for a piece of content. Matches content keywords against tag vocabulary.
+
+Returns: JSON with 'tags' (list of {tag, count}) and 'total' count.""",
+            annotations=_READ_ONLY,
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "search", "suggest"],
+                        "description": "What to do: list top tags, search by prefix, or suggest tags for content.",
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Tag prefix or pattern to match (required for action='search').",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Text content to suggest tags for (required for action='suggest').",
+                    },
+                    "project": {
+                        "type": "string",
+                        "description": "Optional: filter by project name (action='list' only).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "default": 20,
+                        "minimum": 1,
+                        "maximum": 200,
+                        "description": "Maximum number of tags to return (default: 20).",
+                    },
+                },
+                "required": ["action"],
+            },
+        ),
     ]
 
 
@@ -917,6 +961,17 @@ async def call_tool(name: str, arguments: dict[str, Any]):
             tags=arguments.get("tags"),
             importance=arguments.get("importance"),
             merge_chunk_ids=arguments.get("merge_chunk_ids"),
+        )
+
+    elif name == "brain_tags":
+        return await _with_timeout(
+            _brain_tags_mcp(
+                action=arguments["action"],
+                pattern=arguments.get("pattern"),
+                content=arguments.get("content"),
+                project=arguments.get("project"),
+                limit=arguments.get("limit", 20),
+            )
         )
 
     # --- Backward-compat aliases (old tool names route to same handlers) ---
