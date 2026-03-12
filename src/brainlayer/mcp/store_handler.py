@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import threading
 
 import apsw
 from mcp.types import CallToolResult, TextContent
@@ -289,58 +290,74 @@ async def _store(
     function_name: str | None = None,
     line_number: int | None = None,
 ):
-    """Store a memory into BrainLayer. Buffers to JSONL on DB lock."""
+    """Store a memory into BrainLayer with deferred embedding.
+
+    The chunk is stored immediately without waiting for embedding generation.
+    A background task embeds pending chunks after the response is sent.
+    """
     try:
-        from ..store import store_memory
+        from ..store import embed_pending_chunks, store_memory
 
         store = _get_vector_store()
-        model = _get_embedding_model()
         normalized_project = _normalize_project_name(project)
 
-        loop = asyncio.get_running_loop()
-
-        def _embed(text: str) -> list[float]:
-            return model.embed_query(text)
-
-        result = await loop.run_in_executor(
-            None,
-            lambda: store_memory(
-                store=store,
-                embed_fn=_embed,
-                content=content,
-                memory_type=memory_type,
-                project=normalized_project,
-                tags=tags,
-                importance=importance,
-                confidence_score=confidence_score,
-                outcome=outcome,
-                reversibility=reversibility,
-                files_changed=files_changed,
-                entity_id=entity_id,
-                status=status,
-                severity=severity,
-                file_path=file_path,
-                function_name=function_name,
-                line_number=line_number,
-            ),
+        # Store WITHOUT embedding — returns immediately (no executor needed)
+        result = store_memory(
+            store=store,
+            embed_fn=None,
+            content=content,
+            memory_type=memory_type,
+            project=normalized_project,
+            tags=tags,
+            importance=importance,
+            confidence_score=confidence_score,
+            outcome=outcome,
+            reversibility=reversibility,
+            files_changed=files_changed,
+            entity_id=entity_id,
+            status=status,
+            severity=severity,
+            file_path=file_path,
+            function_name=function_name,
+            line_number=line_number,
         )
 
-        try:
-            flushed = await loop.run_in_executor(None, lambda: _flush_pending_stores(store, _embed))
-        except Exception as e:
-            logger.debug("Pending store flush failed: %s", e)
-            flushed = 0
-
         chunk_id = result["id"]
-        parts = [f"Stored memory `{chunk_id}`"]
-        if flushed > 0:
-            parts.append(f"(also flushed {flushed} queued items)")
-        if result["related"]:
-            parts.append(f"\n**Related memories ({len(result['related'])}):**")
-            for r in result["related"]:
-                summary = r.get("summary") or r.get("content", "")[:100]
-                parts.append(f"- {summary}")
 
+        # Schedule background embedding + flush in a single daemon thread.
+        # CRITICAL: must use a separate VectorStore connection — APSW enforces
+        # same-thread usage. The main thread's `store.conn` cannot be shared.
+        db_path = store.db_path
+
+        def _background_embed_and_flush():
+            from ..vector_store import VectorStore as _VS
+
+            bg_store = None
+            try:
+                bg_store = _VS(db_path)
+                model = _get_embedding_model()
+                embed_fn = model.embed_query
+                count = embed_pending_chunks(store=bg_store, embed_fn=embed_fn)
+                if count > 0:
+                    logger.info("Embedded %d pending chunks", count)
+                _flush_pending_stores(bg_store, embed_fn)
+            except Exception as e:
+                logger.warning("Background embedding failed: %s", e)
+                # Model loading failed — still try to flush queued stores
+                # in deferred mode (without embeddings) so they aren't stranded
+                if bg_store:
+                    try:
+                        _flush_pending_stores(bg_store, None)
+                    except Exception as flush_err:
+                        logger.warning("Fallback flush also failed: %s", flush_err)
+            finally:
+                if bg_store:
+                    bg_store.close()
+
+        t = threading.Thread(target=_background_embed_and_flush, daemon=True)
+        t.start()
+
+        parts = [f"Stored memory `{chunk_id}`"]
         structured = {"chunk_id": chunk_id, "related": result["related"]}
         return ([TextContent(type="text", text="\n".join(parts))], structured)
 
