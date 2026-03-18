@@ -71,17 +71,13 @@ class TestContentTypeIndex:
     def test_content_type_index_exists(self, tmp_path):
         store = _make_store(tmp_path)
         cursor = store.conn.cursor()
-        indexes = {
-            row[1] for row in cursor.execute("PRAGMA index_list(chunks)")
-        }
+        indexes = {row[1] for row in cursor.execute("PRAGMA index_list(chunks)")}
         assert "idx_chunks_content_type" in indexes
 
     def test_language_index_exists(self, tmp_path):
         store = _make_store(tmp_path)
         cursor = store.conn.cursor()
-        indexes = {
-            row[1] for row in cursor.execute("PRAGMA index_list(chunks)")
-        }
+        indexes = {row[1] for row in cursor.execute("PRAGMA index_list(chunks)")}
         assert "idx_chunks_language" in indexes
 
 
@@ -94,20 +90,13 @@ class TestTagFilterUsesIndex:
     def test_chunk_tags_table_exists(self, tmp_path):
         store = _make_store(tmp_path)
         cursor = store.conn.cursor()
-        tables = {
-            row[0]
-            for row in cursor.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'"
-            )
-        }
+        tables = {row[0] for row in cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "chunk_tags" in tables
 
     def test_chunk_tags_index_exists(self, tmp_path):
         store = _make_store(tmp_path)
         cursor = store.conn.cursor()
-        indexes = {
-            row[1] for row in cursor.execute("PRAGMA index_list(chunk_tags)")
-        }
+        indexes = {row[1] for row in cursor.execute("PRAGMA index_list(chunk_tags)")}
         assert "idx_chunk_tags_tag" in indexes
 
     def test_tag_trigger_populates_junction_table(self, tmp_path):
@@ -118,12 +107,7 @@ class TestTagFilterUsesIndex:
             tags=["python", "search", "mcp"],
         )
         cursor = store.conn.cursor()
-        tags = [
-            row[0]
-            for row in cursor.execute(
-                "SELECT tag FROM chunk_tags WHERE chunk_id = ?", (chunk_id,)
-            )
-        ]
+        tags = [row[0] for row in cursor.execute("SELECT tag FROM chunk_tags WHERE chunk_id = ?", (chunk_id,))]
         assert sorted(tags) == ["mcp", "python", "search"]
 
     def test_search_tag_filter_uses_chunk_tags(self, tmp_path):
