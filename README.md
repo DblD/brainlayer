@@ -1,18 +1,18 @@
 # BrainLayer
 
-> Persistent memory and knowledge graph for AI agents — 8 MCP tools to search, store, recall, digest, expand, and explore entities across every conversation.
+> Persistent memory and knowledge graph for AI agents — 9 MCP tools, real-time indexing hooks, and a native macOS daemon for always-on recall across every conversation.
 
 [![PyPI](https://img.shields.io/pypi/v/brainlayer.svg)](https://pypi.org/project/brainlayer/)
 [![CI](https://github.com/EtanHey/brainlayer/actions/workflows/ci.yml/badge.svg)](https://github.com/EtanHey/brainlayer/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![MCP](https://img.shields.io/badge/MCP-8%20tools-green.svg)](https://modelcontextprotocol.io)
-[![Tests](https://img.shields.io/badge/tests-874%20passing-brightgreen.svg)](#testing)
+[![MCP](https://img.shields.io/badge/MCP-9%20tools-green.svg)](https://modelcontextprotocol.io)
+[![Tests](https://img.shields.io/badge/tests-1030%20passing-brightgreen.svg)](#testing)
 [![Docs](https://img.shields.io/badge/docs-etanhey.github.io%2Fbrainlayer-blue.svg)](https://etanhey.github.io/brainlayer)
 
 ---
 
-**312,000+ chunks indexed** · **846 Python + 28 Swift tests** · **Hybrid RRF search** · **8 MCP tools** · **BrainBar daemon (209KB)** · **Zero cloud dependencies**
+**317,000+ chunks indexed** · **1,002 Python + 28 Swift tests** · **Real-time indexing hooks** · **9 MCP tools** · **BrainBar daemon (209KB)** · **Zero cloud dependencies**
 
 **Your AI agent forgets everything between sessions.** Every architecture decision, every debugging session, every preference you've expressed — gone. You repeat yourself constantly.
 
@@ -93,7 +93,7 @@ That's it. Your agent now has persistent memory across every conversation.
 
 ```mermaid
 graph LR
-    A["Claude Code / Cursor / Zed"] -->|MCP| B["BrainLayer MCP Server<br/>8 tools"]
+    A["Claude Code / Cursor / Zed"] -->|MCP| B["BrainLayer MCP Server<br/>9 tools"]
     B --> C["Hybrid Search<br/>semantic + keyword (RRF)"]
     C --> D["SQLite + sqlite-vec<br/>single .db file"]
     B --> KG["Knowledge Graph<br/>entities + relations"]
@@ -102,6 +102,9 @@ graph LR
     E["Claude Code JSONL<br/>conversations"] --> F["Pipeline"]
     F -->|extract → classify → chunk → embed| D
     G["Local LLM<br/>Ollama / MLX"] -->|enrich| D
+
+    H["Real-time Hooks"] -->|live per-message| D
+    I["BrainBar<br/>macOS daemon"] -->|Unix socket MCP| B
 ```
 
 **Everything runs locally.** No cloud accounts, no API keys, no Docker, no database servers.
@@ -114,16 +117,18 @@ graph LR
 | Enrichment | Local LLM via Ollama or MLX — 10-field metadata per chunk |
 | MCP Server | stdio-based, MCP SDK v1.26+, compatible with any MCP client |
 | Clustering | Leiden + UMAP for brain graph visualization (optional) |
+| BrainBar | Native macOS daemon (209KB Swift binary) — always-on MCP over Unix socket |
 
-## MCP Tools (8)
+## MCP Tools (9)
 
-### Core (3)
+### Core (4)
 
 | Tool | Description |
 |------|-------------|
 | `brain_search` | Semantic search — unified search across query, file_path, chunk_id, filters. |
 | `brain_store` | Persist memories — ideas, decisions, learnings, mistakes. Auto-type/auto-importance. |
 | `brain_recall` | Proactive retrieval — current context, sessions, session summaries. |
+| `brain_tags` | Browse and filter by tag — discover what's in memory without a search query. |
 
 ### Knowledge Graph (5)
 
@@ -172,19 +177,20 @@ BRAINLAYER_ENRICH_BACKEND=mlx brainlayer enrich --batch-size=100
 
 | | BrainLayer | Mem0 | Zep/Graphiti | Letta | LangChain Memory |
 |---|:---:|:---:|:---:|:---:|:---:|
-| **MCP native** | 8 tools | 1 server | 1 server | No | No |
+| **MCP native** | 9 tools | 1 server | 1 server | No | No |
 | **Think / Recall** | Yes | No | No | No | No |
 | **Local-first** | SQLite | Cloud-first | Cloud-only | Docker+PG | Framework |
 | **Zero infra** | `pip install` | API key | API key | Docker | Multiple deps |
-| **Multi-source** | 6 sources | API only | API only | API only | API only |
+| **Multi-source** | 7 sources | API only | API only | API only | API only |
 | **Enrichment** | 10 fields | Basic | Temporal | Self-write | None |
 | **Session analysis** | Yes | No | No | No | No |
+| **Real-time** | Per-message hooks | No | No | No | No |
 | **Open source** | Apache 2.0 | Apache 2.0 | Source-available | Apache 2.0 | MIT |
 
 BrainLayer is the only memory layer that:
 1. **Thinks before answering** — categorizes past knowledge by intent (decisions, bugs, patterns) instead of raw search results
 2. **Runs on a single file** — no database servers, no Docker, no cloud accounts
-3. **Works with every MCP client** — 8 tools, instant integration, zero SDK
+3. **Works with every MCP client** — 9 tools, instant integration, zero SDK
 4. **Knowledge graph** — entities, relations, and person lookup across all indexed data
 
 ## CLI Reference
@@ -246,12 +252,13 @@ BrainLayer can index conversations from multiple sources:
 | Codex CLI | JSONL (`~/.codex/sessions`) | `brainlayer ingest-codex` |
 | Markdown | Any `.md` files | `brainlayer index --source markdown` |
 | Manual | Via MCP tool | `brain_store` |
+| Real-time | Claude Code hooks | Live per-message indexing (zero-lag) |
 
 ## Testing
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/                           # Full suite (846 Python tests)
+pytest tests/                           # Full suite (1,002 Python tests)
 pytest tests/ -m "not integration"      # Unit tests only (fast)
 ruff check src/                         # Linting
 # BrainBar (Swift): 28 tests via Xcode
