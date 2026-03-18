@@ -157,6 +157,76 @@ final class DatabaseTests: XCTestCase {
         XCTAssertEqual(filtered.first?["chunk_id"] as? String, "combo-1")
     }
 
+    // MARK: - Production rowid divergence
+
+    /// Simulates production DB where FTS5 rowids don't match chunks rowids.
+    /// In production, Python's trigger doesn't set explicit rowid, so after
+    /// FTS5 table rebuilds, rowids diverge. The JOIN must use chunk_id, not rowid.
+    func testImportanceFilterWorksWithDivergedRowids() throws {
+        // Insert two chunks normally (synced rowids via trigger)
+        try db.insertChunk(id: "div-1", content: "Unimportant chatter about weather", sessionId: "s1", project: "test", contentType: "assistant_text", importance: 2)
+        try db.insertChunk(id: "div-2", content: "Critical architecture decision about caching", sessionId: "s2", project: "test", contentType: "assistant_text", importance: 9)
+
+        // Simulate production rebuild: drop FTS5 table + triggers, recreate, re-populate
+        // This creates divergent rowids: FTS5 rows get new rowids 1,2 but chunks keep original rowids
+        db.exec("DROP TRIGGER IF EXISTS chunks_fts_insert")
+        db.exec("DROP TRIGGER IF EXISTS chunks_fts_delete")
+        db.exec("DROP TRIGGER IF EXISTS chunks_fts_update")
+        db.exec("DROP TABLE IF EXISTS chunks_fts")
+        db.exec("""
+            CREATE VIRTUAL TABLE chunks_fts USING fts5(
+                content, summary, tags, resolved_query, chunk_id UNINDEXED
+            )
+        """)
+        // Re-populate WITHOUT explicit rowid (matches production trigger behavior).
+        // FTS5 auto-assigns rowid 1 to div-2 and rowid 2 to div-1 (or vice versa),
+        // which WON'T match the chunks table rowids.
+        // Insert in REVERSE order to guarantee mismatch: FTS5 rowid 1 = high-importance chunk.
+        db.exec("""
+            INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+            SELECT content, summary, tags, NULL, id FROM chunks ORDER BY id DESC
+        """)
+        // Recreate trigger matching production (no explicit rowid)
+        db.exec("""
+            CREATE TRIGGER chunks_fts_insert AFTER INSERT ON chunks BEGIN
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                VALUES (new.content, new.summary, new.tags, NULL, new.id);
+            END
+        """)
+
+        // Search with importance_min=7 — should return ONLY the high-importance chunk
+        let filtered = try db.search(query: "architecture decision caching", limit: 10, importanceMin: 7.0)
+        XCTAssertEqual(filtered.count, 1, "Should return only high-importance chunk")
+        XCTAssertEqual(filtered.first?["chunk_id"] as? String, "div-2")
+
+        // Also verify the returned importance is correct (not from wrong row)
+        let importance = filtered.first?["importance"]
+        XCTAssertNotNil(importance, "importance should be present")
+        // Should be 9, not 2 (which would happen if rowids mapped to wrong chunk)
+        if let imp = importance as? Int {
+            XCTAssertGreaterThanOrEqual(imp, 7, "Returned importance must be >= 7")
+        } else if let imp = importance as? Double {
+            XCTAssertGreaterThanOrEqual(imp, 7.0, "Returned importance must be >= 7")
+        }
+    }
+
+    /// Verify ALL results from importance_min search actually have importance >= threshold.
+    func testAllResultsRespectImportanceMin() throws {
+        try db.insertChunk(id: "all-1", content: "Vector database indexing strategies", sessionId: "s1", project: "test", contentType: "assistant_text", importance: 3)
+        try db.insertChunk(id: "all-2", content: "Vector database performance tuning", sessionId: "s2", project: "test", contentType: "assistant_text", importance: 7)
+        try db.insertChunk(id: "all-3", content: "Vector database scaling patterns", sessionId: "s3", project: "test", contentType: "assistant_text", importance: 9)
+
+        let results = try db.search(query: "vector database", limit: 10, importanceMin: 7.0)
+        XCTAssertEqual(results.count, 2, "Should return only chunks with importance >= 7")
+        for result in results {
+            if let imp = result["importance"] as? Int {
+                XCTAssertGreaterThanOrEqual(imp, 7, "Every result must have importance >= 7")
+            } else if let imp = result["importance"] as? Double {
+                XCTAssertGreaterThanOrEqual(imp, 7.0, "Every result must have importance >= 7")
+            }
+        }
+    }
+
     // MARK: - Concurrent reads
 
     func testConcurrentReadsDoNotBlock() throws {

@@ -84,27 +84,25 @@ final class BrainDatabase: @unchecked Sendable {
             )
         """)
 
-        // FTS sync triggers (match production trigger names)
+        // FTS sync triggers — match production (no explicit rowid; JOIN uses chunk_id)
         exec("""
             CREATE TRIGGER IF NOT EXISTS chunks_fts_insert AFTER INSERT ON chunks BEGIN
-                INSERT INTO chunks_fts(rowid, content, summary, tags, resolved_query, chunk_id)
-                VALUES (new.rowid, new.content, new.summary, new.tags, NULL, new.id);
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                VALUES (new.content, new.summary, new.tags, NULL, new.id);
             END
         """)
 
         exec("""
             CREATE TRIGGER IF NOT EXISTS chunks_fts_delete AFTER DELETE ON chunks BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, content, summary, tags, resolved_query, chunk_id)
-                VALUES ('delete', old.rowid, old.content, old.summary, old.tags, NULL, old.id);
+                DELETE FROM chunks_fts WHERE chunk_id = old.id;
             END
         """)
 
         exec("""
             CREATE TRIGGER IF NOT EXISTS chunks_fts_update AFTER UPDATE ON chunks BEGIN
-                INSERT INTO chunks_fts(chunks_fts, rowid, content, summary, tags, resolved_query, chunk_id)
-                VALUES ('delete', old.rowid, old.content, old.summary, old.tags, NULL, old.id);
-                INSERT INTO chunks_fts(rowid, content, summary, tags, resolved_query, chunk_id)
-                VALUES (new.rowid, new.content, new.summary, new.tags, NULL, new.id);
+                DELETE FROM chunks_fts WHERE chunk_id = old.id;
+                INSERT INTO chunks_fts(content, summary, tags, resolved_query, chunk_id)
+                VALUES (new.content, new.summary, new.tags, NULL, new.id);
             END
         """)
     }
@@ -198,7 +196,7 @@ final class BrainDatabase: @unchecked Sendable {
             SELECT c.id, c.content, c.project, c.content_type, c.importance,
                    c.created_at, c.summary, c.tags, c.conversation_id
             FROM chunks_fts f
-            JOIN chunks c ON f.rowid = c.rowid
+            JOIN chunks c ON c.id = f.chunk_id
             WHERE \(whereClause)
             ORDER BY rank
             LIMIT ?
@@ -232,7 +230,7 @@ final class BrainDatabase: @unchecked Sendable {
             row["content"] = columnText(stmt, 1)
             row["project"] = columnText(stmt, 2)
             row["content_type"] = columnText(stmt, 3)
-            row["importance"] = Int(sqlite3_column_int(stmt, 4))
+            row["importance"] = sqlite3_column_double(stmt, 4)
             row["created_at"] = columnText(stmt, 5)
             row["summary"] = columnText(stmt, 6)
             row["tags"] = columnText(stmt, 7)
@@ -282,7 +280,7 @@ final class BrainDatabase: @unchecked Sendable {
 
     // MARK: - Helpers
 
-    private func exec(_ sql: String) {
+    func exec(_ sql: String) {
         guard let db else { return }
         var errMsg: UnsafeMutablePointer<CChar>?
         let rc = sqlite3_exec(db, sql, nil, nil, &errMsg)
