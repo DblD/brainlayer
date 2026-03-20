@@ -9,6 +9,73 @@
 import Foundation
 
 final class BrainBarServer: @unchecked Sendable {
+    private struct SubscriptionPayload: Encodable {
+        let status: String
+        let agentID: String
+        let generation: Int
+        let tags: [String]
+        let lastDeliveredSeq: Int64
+        let lastAckedSeq: Int64
+        let unreadCount: Int
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case agentID = "agent_id"
+            case generation
+            case tags
+            case lastDeliveredSeq = "last_delivered_seq"
+            case lastAckedSeq = "last_acked_seq"
+            case unreadCount = "unread_count"
+        }
+    }
+
+    private struct ChannelNotification: Encodable {
+        let jsonrpc = "2.0"
+        let method = "notifications/claude/channel"
+        let params: Params
+
+        struct Params: Encodable {
+            let content: String
+            let meta: Meta
+        }
+
+        struct Meta: Encodable {
+            let chunkID: String
+            let rowID: String
+            let agentID: String
+            let tags: String
+            let importance: String
+
+            enum CodingKeys: String, CodingKey {
+                case chunkID = "chunk_id"
+                case rowID = "rowid"
+                case agentID = "agent_id"
+                case tags
+                case importance
+            }
+        }
+    }
+
+    private struct ResourceUpdatedNotification: Encodable {
+        let jsonrpc = "2.0"
+        let method = "notifications/resources/updated"
+        let params: Params
+
+        struct Params: Encodable {
+            let uri: String
+        }
+    }
+
+    private struct StoreResultPayload: Decodable {
+        let chunkID: String
+        let rowID: Int64
+
+        enum CodingKeys: String, CodingKey {
+            case chunkID = "chunk_id"
+            case rowID = "rowid"
+        }
+    }
+
     private let socketPath: String
     private let dbPath: String
     private let queue = DispatchQueue(label: "com.brainlayer.brainbar.server", qos: .userInitiated)
@@ -46,14 +113,29 @@ final class BrainBarServer: @unchecked Sendable {
         /// Whether this client uses Content-Length framing (LSP-style).
         /// false = newline-delimited JSON-RPC (Claude Code v2.1+).
         var usesContentLengthFraming: Bool = true
+        var agentID: String?
+        var subscribedTags: Set<String> = []
+        var subscribedResourceURIs: Set<String> = []
     }
 
-    init(socketPath: String = "/tmp/brainbar.sock", dbPath: String? = nil) {
-        self.socketPath = socketPath
+    init(socketPath: String? = nil, dbPath: String? = nil) {
+        self.socketPath = socketPath ?? Self.defaultSocketPath()
         self.dbPath = dbPath ?? Self.defaultDBPath()
     }
 
+    static func defaultSocketPath() -> String {
+        if let override = ProcessInfo.processInfo.environment["BRAINBAR_SOCKET_PATH"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return override
+        }
+        return "/tmp/brainbar.sock"
+    }
+
     static func defaultDBPath() -> String {
+        if let override = ProcessInfo.processInfo.environment["BRAINBAR_DB_PATH"],
+           !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return override
+        }
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         return "\(home)/.local/share/brainlayer/brainlayer.db"
     }
@@ -206,7 +288,7 @@ final class BrainBarServer: @unchecked Sendable {
             let method = msg["method"] as? String ?? "<no method>"
             let id = msg["id"]
             debugLog("  MSG fd=\(fd): method=\(method) id=\(String(describing: id))")
-            let response = router.handle(msg)
+            let response = handleMessage(fd: fd, request: msg)
             if !response.isEmpty {
                 sendResponse(fd: fd, response: response, useContentLength: state.usesContentLengthFraming)
                 debugLog("  SENT response for method=\(method)")
@@ -217,22 +299,57 @@ final class BrainBarServer: @unchecked Sendable {
             if clients[fd] == nil { return }
         }
 
-        clients[fd] = state
+        if var latest = clients[fd] {
+            latest.framing = state.framing
+            latest.usesContentLengthFraming = state.usesContentLengthFraming
+            clients[fd] = latest
+        }
     }
 
-    private func sendResponse(fd: Int32, response: [String: Any], useContentLength: Bool = true) {
+    private func handleMessage(fd: Int32, request: [String: Any]) -> [String: Any] {
+        if let toolCall = parseToolCall(request) {
+            switch toolCall.name {
+            case "brain_subscribe":
+                return handleSubscribeTool(fd: fd, id: request["id"], arguments: toolCall.arguments)
+            case "brain_unsubscribe":
+                return handleUnsubscribeTool(fd: fd, id: request["id"], arguments: toolCall.arguments)
+            case "brain_ack":
+                return handleAckTool(id: request["id"], arguments: toolCall.arguments)
+            default:
+                let response = router.handle(request)
+                if toolCall.name == "brain_store", !isToolError(response) {
+                    publishStoredChunk(response: response, arguments: toolCall.arguments)
+                }
+                return response
+            }
+        }
+        if let method = request["method"] as? String {
+            switch method {
+            case "resources/subscribe":
+                return handleResourceSubscribe(fd: fd, id: request["id"], params: request["params"] as? [String: Any] ?? [:])
+            case "resources/unsubscribe":
+                return handleResourceUnsubscribe(fd: fd, id: request["id"], params: request["params"] as? [String: Any] ?? [:])
+            default:
+                break
+            }
+        }
+        return router.handle(request)
+    }
+
+    @discardableResult
+    private func sendResponse(fd: Int32, response: [String: Any], useContentLength: Bool = true) -> Bool {
         let framed: Data
         if useContentLength {
-            guard let data = try? MCPFraming.encode(response) else { return }
+            guard let data = try? MCPFraming.encode(response) else { return false }
             framed = data
         } else {
             // Newline-delimited JSON-RPC (Claude Code v2.1+ / MCP 2025-11-25)
-            guard let jsonData = try? JSONSerialization.data(withJSONObject: response) else { return }
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: response) else { return false }
             var data = jsonData
             data.append(0x0A) // trailing \n
             framed = data
         }
-        framed.withUnsafeBytes { ptr in
+        return framed.withUnsafeBytes { ptr in
             var totalWritten = 0
             var eagainRetries = 0
             while totalWritten < framed.count {
@@ -243,27 +360,31 @@ final class BrainBarServer: @unchecked Sendable {
                         if eagainRetries > Self.maxWriteRetries {
                             NSLog("[BrainBar] ⚠️ Write stalled on fd %d after %d EAGAIN retries (%d ms) — disconnecting dead client", fd, eagainRetries, eagainRetries - 1)
                             disconnectClient(fd: fd)
-                            return
+                            return false
                         }
                         usleep(1000) // 1 ms
                         continue
                     }
                     NSLog("[BrainBar] Write error on fd %d: errno %d", fd, errno)
                     disconnectClient(fd: fd)
-                    return
+                    return false
                 }
                 if n == 0 {
                     NSLog("[BrainBar] Write returned 0 on fd %d — peer closed", fd)
                     disconnectClient(fd: fd)
-                    return
+                    return false
                 }
                 totalWritten += n
                 eagainRetries = 0 // reset on successful partial write
             }
+            return true
         }
     }
 
     private func disconnectClient(fd: Int32) {
+        if let agentID = clients[fd]?.agentID {
+            try? database?.markSubscriberDisconnected(agentID: agentID)
+        }
         clients[fd]?.source.cancel()
         clients.removeValue(forKey: fd)
         NSLog("[BrainBar] Client disconnected (fd: %d)", fd)
@@ -280,5 +401,282 @@ final class BrainBarServer: @unchecked Sendable {
         unlink(socketPath)
         database?.close()
         NSLog("[BrainBar] Server stopped")
+    }
+
+    private func handleSubscribeTool(fd: Int32, id: Any?, arguments: [String: Any]) -> [String: Any] {
+        guard let agentID = (arguments["agent_id"] as? String) ?? (arguments["subscriber_id"] as? String),
+              let tags = arguments["tags"] as? [String],
+              let database else {
+            return toolErrorResponse(id: id, message: "Database not available")
+        }
+
+        do {
+            let existing = try database.subscription(agentID: agentID)
+            let incrementGeneration = prepareAgentTakeover(fd: fd, agentID: agentID, recordExists: existing != nil)
+            let record = try database.upsertSubscription(agentID: agentID, tags: tags, incrementGeneration: incrementGeneration)
+            if var client = clients[fd] {
+                client.agentID = agentID
+                client.subscribedTags = Set(record.tags)
+                clients[fd] = client
+            }
+            let unreadCount = try database.unreadCount(agentID: agentID, tags: record.tags)
+            let payload = SubscriptionPayload(
+                status: "subscribed",
+                agentID: agentID,
+                generation: record.generation,
+                tags: record.tags,
+                lastDeliveredSeq: record.lastDeliveredSeq,
+                lastAckedSeq: record.lastAckedSeq,
+                unreadCount: unreadCount
+            )
+            return jsonRPCTextResult(id: id, text: jsonString(payload))
+        } catch {
+            return toolErrorResponse(id: id, message: error.localizedDescription)
+        }
+    }
+
+    private func handleUnsubscribeTool(fd: Int32, id: Any?, arguments: [String: Any]) -> [String: Any] {
+        guard let agentID = (arguments["agent_id"] as? String) ?? (arguments["subscriber_id"] as? String),
+              let database else {
+            return toolErrorResponse(id: id, message: "Database not available")
+        }
+
+        do {
+            let tags = arguments["tags"] as? [String]
+            let record = try database.removeSubscription(agentID: agentID, tags: tags)
+            if var client = clients[fd] {
+                client.agentID = agentID
+                client.subscribedTags = Set(record.tags)
+                clients[fd] = client
+            }
+            let payload = SubscriptionPayload(
+                status: "unsubscribed",
+                agentID: agentID,
+                generation: record.generation,
+                tags: record.tags,
+                lastDeliveredSeq: record.lastDeliveredSeq,
+                lastAckedSeq: record.lastAckedSeq,
+                unreadCount: try database.unreadCount(agentID: agentID, tags: record.tags)
+            )
+            return jsonRPCTextResult(id: id, text: jsonString(payload))
+        } catch {
+            return toolErrorResponse(id: id, message: error.localizedDescription)
+        }
+    }
+
+    private func handleAckTool(id: Any?, arguments: [String: Any]) -> [String: Any] {
+        guard let agentID = (arguments["agent_id"] as? String) ?? (arguments["subscriber_id"] as? String),
+              let database else {
+            return toolErrorResponse(id: id, message: "Database not available")
+        }
+
+        let seq: Int64
+        if let intSeq = arguments["seq"] as? Int {
+            seq = Int64(intSeq)
+        } else if let int64Seq = arguments["seq"] as? Int64 {
+            seq = int64Seq
+        } else {
+            return toolErrorResponse(id: id, message: "Missing or invalid seq")
+        }
+
+        do {
+            try database.acknowledge(agentID: agentID, seq: seq)
+            return jsonRPCTextResult(id: id, text: #"{"status":"acked"}"#)
+        } catch {
+            return toolErrorResponse(id: id, message: error.localizedDescription)
+        }
+    }
+
+    private func handleResourceSubscribe(fd: Int32, id: Any?, params: [String: Any]) -> [String: Any] {
+        guard let uri = params["uri"] as? String, BrainDatabase.tag(fromResourceURI: uri) != nil else {
+            return jsonRPCError(id: id, code: -32602, message: "Invalid resource uri")
+        }
+        if var client = clients[fd] {
+            client.subscribedResourceURIs.insert(uri)
+            clients[fd] = client
+        }
+        return jsonRPCResult(id: id, result: [:])
+    }
+
+    private func handleResourceUnsubscribe(fd: Int32, id: Any?, params: [String: Any]) -> [String: Any] {
+        guard let uri = params["uri"] as? String else {
+            return jsonRPCError(id: id, code: -32602, message: "Missing resource uri")
+        }
+        if var client = clients[fd] {
+            client.subscribedResourceURIs.remove(uri)
+            clients[fd] = client
+        }
+        return jsonRPCResult(id: id, result: [:])
+    }
+
+    private func prepareAgentTakeover(fd: Int32, agentID: String, recordExists: Bool) -> Bool {
+        var incrementGeneration = recordExists
+        for (otherFD, otherClient) in Array(clients) where otherFD != fd && otherClient.agentID == agentID {
+            incrementGeneration = true
+            disconnectClient(fd: otherFD)
+        }
+        if clients[fd]?.agentID == agentID {
+            return false
+        }
+        return incrementGeneration
+    }
+
+    private func toolErrorResponse(id: Any?, message: String) -> [String: Any] {
+        var response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "content": [
+                ["type": "text", "text": "Error: \(message)"]
+            ],
+            "isError": true
+        ]
+        if let id {
+            response["id"] = id
+        }
+        response["result"] = [
+            "content": [
+                ["type": "text", "text": "Error: \(message)"]
+            ],
+            "isError": true
+        ] as [String: Any]
+        response.removeValue(forKey: "content")
+        response.removeValue(forKey: "isError")
+        return response
+    }
+
+    private func jsonRPCTextResult(id: Any?, text: String) -> [String: Any] {
+        var response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "result": [
+                "content": [
+                    ["type": "text", "text": text]
+                ]
+            ] as [String: Any]
+        ]
+        if let id {
+            response["id"] = id
+        }
+        return response
+    }
+
+    private func jsonRPCResult(id: Any?, result: [String: Any]) -> [String: Any] {
+        var response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "result": result
+        ]
+        if let id {
+            response["id"] = id
+        }
+        return response
+    }
+
+    private func jsonRPCError(id: Any?, code: Int, message: String) -> [String: Any] {
+        var response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "error": [
+                "code": code,
+                "message": message
+            ]
+        ]
+        if let id {
+            response["id"] = id
+        }
+        return response
+    }
+
+    private func isToolError(_ response: [String: Any]) -> Bool {
+        let result = response["result"] as? [String: Any]
+        return result?["isError"] as? Bool == true
+    }
+
+    private func parseToolCall(_ request: [String: Any]) -> (name: String, arguments: [String: Any])? {
+        guard let method = request["method"] as? String, method == "tools/call",
+              let params = request["params"] as? [String: Any],
+              let name = params["name"] as? String else {
+            return nil
+        }
+        let arguments = params["arguments"] as? [String: Any] ?? [:]
+        return (name, arguments)
+    }
+
+    private func publishStoredChunk(response: [String: Any], arguments: [String: Any]) {
+        guard let stored = extractStoredChunk(from: response),
+              let content = arguments["content"] as? String,
+              let tags = arguments["tags"] as? [String],
+              !tags.isEmpty else {
+            return
+        }
+
+        let importance = arguments["importance"] as? Int ?? 5
+        let tagSet = Set(tags)
+        let resourceURIs = Set(tags.map { "brain://tag/\($0)" })
+        for (clientFD, client) in Array(clients) {
+            if !client.subscribedResourceURIs.isDisjoint(with: resourceURIs) {
+                for uri in resourceURIs where client.subscribedResourceURIs.contains(uri) {
+                    let notification = ResourceUpdatedNotification(params: .init(uri: uri))
+                    if let object = jsonObject(notification) {
+                        _ = sendResponse(
+                            fd: clientFD,
+                            response: object,
+                            useContentLength: client.usesContentLengthFraming
+                        )
+                    }
+                }
+            }
+
+            if let agentID = client.agentID,
+               !client.subscribedTags.isDisjoint(with: tagSet) {
+                let notification = ChannelNotification(
+                    params: .init(
+                        content: content,
+                        meta: .init(
+                            chunkID: stored.chunkID,
+                            rowID: String(stored.rowID),
+                            agentID: agentID,
+                            tags: tags.joined(separator: ","),
+                            importance: String(importance)
+                        )
+                    )
+                )
+                guard let notificationObject = jsonObject(notification) else {
+                    continue
+                }
+
+                let delivered = sendResponse(
+                    fd: clientFD,
+                    response: notificationObject,
+                    useContentLength: client.usesContentLengthFraming
+                )
+                if delivered {
+                    try? database?.markDelivered(agentID: agentID, seq: stored.rowID)
+                }
+            }
+        }
+    }
+
+    private func extractStoredChunk(from response: [String: Any]) -> StoreResultPayload? {
+        guard let result = response["result"] as? [String: Any],
+              let content = result["content"] as? [[String: Any]],
+              let text = content.first?["text"] as? String,
+              let data = text.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(StoreResultPayload.self, from: data) else {
+            return nil
+        }
+        return payload
+    }
+
+    private func jsonString<T: Encodable>(_ payload: T) -> String {
+        guard let data = try? JSONEncoder().encode(payload),
+              let text = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return text
+    }
+
+    private func jsonObject<T: Encodable>(_ payload: T) -> [String: Any]? {
+        guard let data = try? JSONEncoder().encode(payload),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
     }
 }

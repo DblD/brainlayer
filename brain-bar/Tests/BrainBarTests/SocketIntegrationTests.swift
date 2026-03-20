@@ -91,7 +91,7 @@ final class SocketIntegrationTests: XCTestCase {
 
         let tools = (response["result"] as? [String: Any])?["tools"] as? [[String: Any]]
         XCTAssertNotNil(tools)
-        XCTAssertEqual(tools?.count, 8)
+        XCTAssertEqual(tools?.count, 11)
     }
 
     // MARK: - MCP tools/call brain_search over socket
@@ -116,6 +116,300 @@ final class SocketIntegrationTests: XCTestCase {
 
         XCTAssertNil(response["error"], "brain_search should not error")
         XCTAssertNotNil(response["result"])
+    }
+
+    func testMCPBrainSubscribeOverSocketReturnsCursorState() throws {
+        _ = try sendMCPRequest([
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": ["protocolVersion": "2024-11-05", "capabilities": [:] as [String: Any],
+                       "clientInfo": ["name": "subscriber", "version": "1.0"]]
+        ])
+
+        let response = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-1",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+
+        let result = response["result"] as? [String: Any]
+        let content = result?["content"] as? [[String: Any]]
+        let text = content?.first?["text"] as? String ?? "{}"
+        let payload = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+
+        XCTAssertEqual(payload?["status"] as? String, "subscribed")
+        XCTAssertEqual(payload?["agent_id"] as? String, "agent-1")
+        XCTAssertEqual(payload?["last_delivered_seq"] as? Int, 0)
+        XCTAssertEqual(payload?["last_acked_seq"] as? Int, 0)
+        XCTAssertNotNil(payload?["generation"])
+    }
+
+    func testMCPBrainUnsubscribeOverSocketReturnsResult() throws {
+        _ = try sendMCPRequest([
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": ["protocolVersion": "2024-11-05", "capabilities": [:] as [String: Any],
+                       "clientInfo": ["name": "subscriber", "version": "1.0"]]
+        ])
+
+        _ = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-1",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+
+        let response = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_unsubscribe",
+                "arguments": [
+                    "agent_id": "agent-1",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+
+        let result = response["result"] as? [String: Any]
+        let content = result?["content"] as? [[String: Any]]
+        let text = content?.first?["text"] as? String ?? "{}"
+        let payload = try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any]
+
+        XCTAssertEqual(payload?["status"] as? String, "unsubscribed")
+        XCTAssertEqual(payload?["agent_id"] as? String, "agent-1")
+    }
+
+    func testMatchingStorePushesChannelNotificationAndRequiresAckToClearUnread() throws {
+        let subscriberFD = try connectClient()
+        defer { close(subscriberFD) }
+
+        try initializeClient(fd: subscriberFD, name: "subscriber")
+        try sendMCPRequest(on: subscriberFD, request: [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-live",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        _ = try readMCPMessage(fd: subscriberFD)
+
+        _ = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [:] as [String: Any],
+                "clientInfo": ["name": "publisher", "version": "1.0"]
+            ]
+        ])
+
+        let publishResponse = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_store",
+                "arguments": [
+                    "content": "Live push message for agent live",
+                    "tags": ["agent-message"],
+                    "importance": 6
+                ] as [String: Any]
+            ]
+        ])
+        XCTAssertNil(publishResponse["error"])
+
+        let notification = try readMCPMessage(fd: subscriberFD)
+        XCTAssertEqual(notification["method"] as? String, "notifications/claude/channel")
+        let params = notification["params"] as? [String: Any]
+        let content = params?["content"] as? String ?? ""
+        XCTAssertTrue(content.contains("Live push message for agent live"))
+        let meta = params?["meta"] as? [String: Any]
+        let rowID = (meta?["rowid"] as? String).flatMap(Int.init)
+        XCTAssertNotNil(rowID)
+
+        let unreadResponse = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_search",
+                "arguments": [
+                    "query": "Live push message",
+                    "agent_id": "agent-live",
+                    "unread_only": true
+                ] as [String: Any]
+            ]
+        ])
+
+        let unreadResult = unreadResponse["result"] as? [String: Any]
+        let unreadContent = unreadResult?["content"] as? [[String: Any]]
+        let unreadText = unreadContent?.first?["text"] as? String ?? "[]"
+        let unreadMatches = (try? JSONSerialization.jsonObject(with: Data(unreadText.utf8))) as? [[String: Any]] ?? []
+        XCTAssertEqual(unreadMatches.count, 1, "Live-delivered chunk should stay unread until ack")
+
+        let ackResponse = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_ack",
+                "arguments": [
+                    "agent_id": "agent-live",
+                    "seq": rowID as Any
+                ] as [String: Any]
+            ]
+        ])
+        XCTAssertNil(ackResponse["error"])
+
+        let clearedResponse = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_search",
+                "arguments": [
+                    "query": "Live push message",
+                    "agent_id": "agent-live",
+                    "unread_only": true
+                ] as [String: Any]
+            ]
+        ])
+        let clearedResult = clearedResponse["result"] as? [String: Any]
+        let clearedContent = clearedResult?["content"] as? [[String: Any]]
+        let clearedText = clearedContent?.first?["text"] as? String ?? "[]"
+        let clearedMatches = (try? JSONSerialization.jsonObject(with: Data(clearedText.utf8))) as? [[String: Any]] ?? []
+        XCTAssertTrue(clearedMatches.isEmpty, "Acked chunk should no longer be unread")
+    }
+
+    func testDeadSubscriberDoesNotBlockLiveSubscriberNotification() throws {
+        let deadFD = try connectClient()
+        try initializeClient(fd: deadFD, name: "dead-subscriber")
+        try sendMCPRequest(on: deadFD, request: [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-dead",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        _ = try readMCPMessage(fd: deadFD)
+        close(deadFD)
+
+        let liveFD = try connectClient()
+        defer { close(liveFD) }
+        try initializeClient(fd: liveFD, name: "live-subscriber")
+        try sendMCPRequest(on: liveFD, request: [
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-live-2",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        _ = try readMCPMessage(fd: liveFD)
+
+        let storeResponse = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_store",
+                "arguments": [
+                    "content": "Fanout survives dead subscriber",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        XCTAssertNil(storeResponse["error"])
+
+        let notification = try readMCPMessage(fd: liveFD)
+        XCTAssertEqual(notification["method"] as? String, "notifications/claude/channel")
+        let params = notification["params"] as? [String: Any]
+        let content = params?["content"] as? String ?? ""
+        XCTAssertTrue(content.contains("Fanout survives dead subscriber"))
+    }
+
+    func testSecondConnectionTakesOverAgentIdentity() throws {
+        let firstFD = try connectClient()
+        defer { close(firstFD) }
+        try initializeClient(fd: firstFD, name: "first")
+        try sendMCPRequest(on: firstFD, request: [
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-takeover",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        _ = try readMCPMessage(fd: firstFD)
+
+        let secondFD = try connectClient()
+        defer { close(secondFD) }
+        try initializeClient(fd: secondFD, name: "second")
+        try sendMCPRequest(on: secondFD, request: [
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "agent-takeover",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+        _ = try readMCPMessage(fd: secondFD)
+
+        var oneByte = [UInt8](repeating: 0, count: 1)
+        let firstRead = read(firstFD, &oneByte, 1)
+        XCTAssertLessThanOrEqual(firstRead, 0, "First socket should be closed after takeover")
+
+        _ = try sendMCPRequest([
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_store",
+                "arguments": [
+                    "content": "Takeover delivery",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ])
+
+        let notification = try readMCPMessage(fd: secondFD)
+        XCTAssertEqual(notification["method"] as? String, "notifications/claude/channel")
     }
 
     // MARK: - C1: Write retry cap
@@ -168,6 +462,125 @@ final class SocketIntegrationTests: XCTestCase {
         XCTAssertNotNil(secondResponse["result"], "Serial queue must not be blocked — second client should get response")
     }
 
+    func testStdioAdapterBridgesInitializeAndSubscribe() throws {
+        let adapterPath = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Scripts/brainbar_stdio_adapter.py")
+            .path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "python3",
+            adapterPath,
+            "--socket",
+            testSocketPath,
+        ]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+        try process.run()
+        defer {
+            process.terminate()
+            process.waitUntilExit()
+        }
+
+        try sendLineJSON([
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [:] as [String: Any],
+                "clientInfo": ["name": "adapter", "version": "1.0"]
+            ]
+        ], to: stdinPipe.fileHandleForWriting)
+
+        let initializeResponse = try readLineJSON(from: stdoutPipe.fileHandleForReading)
+        let capabilities = (initializeResponse["result"] as? [String: Any])?["capabilities"] as? [String: Any]
+        let experimental = capabilities?["experimental"] as? [String: Any]
+        XCTAssertEqual((experimental?["claude/channel"] as? [String: Any])?.isEmpty, true)
+
+        try sendLineJSON([
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "agent_id": "adapter-agent",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ], to: stdinPipe.fileHandleForWriting)
+
+        let subscribeResponse = try readLineJSON(from: stdoutPipe.fileHandleForReading)
+        let result = subscribeResponse["result"] as? [String: Any]
+        XCTAssertNotNil(result)
+    }
+
+    func testStdioAdapterDrainsResponsesAfterStdinEOF() throws {
+        let adapterPath = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Scripts/brainbar_stdio_adapter.py")
+            .path
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = [
+            "python3",
+            adapterPath,
+            "--socket",
+            testSocketPath,
+        ]
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = Pipe()
+        try process.run()
+
+        try sendLineJSON([
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [:] as [String: Any],
+                "clientInfo": ["name": "adapter-eof", "version": "1.0"]
+            ]
+        ], to: stdinPipe.fileHandleForWriting)
+        try sendLineJSON([
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+        ], to: stdinPipe.fileHandleForWriting)
+        try stdinPipe.fileHandleForWriting.close()
+
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+
+        let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let outputLines = String(decoding: stdoutData, as: UTF8.self)
+            .split(separator: "\n")
+            .map(String.init)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        XCTAssertEqual(outputLines.count, 2)
+
+        let initializeResponse = try JSONSerialization.jsonObject(with: Data(outputLines[0].utf8)) as? [String: Any]
+        XCTAssertNotNil(initializeResponse?["result"])
+
+        let toolsResponse = try JSONSerialization.jsonObject(with: Data(outputLines[1].utf8)) as? [String: Any]
+        let tools = (toolsResponse?["result"] as? [String: Any])?["tools"] as? [[String: Any]]
+        XCTAssertEqual(tools?.count, 11)
+    }
+
     // MARK: - C2: Socket path length validation
 
     func testRejectsOverlongSocketPath() throws {
@@ -195,9 +608,15 @@ final class SocketIntegrationTests: XCTestCase {
     // MARK: - Helper
 
     private func sendMCPRequest(_ request: [String: Any]) throws -> [String: Any] {
+        let fd = try connectClient()
+        defer { close(fd) }
+        try sendMCPRequest(on: fd, request: request)
+        return try readMCPMessage(fd: fd)
+    }
+
+    private func connectClient() throws -> Int32 {
         let fd = socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "socket() failed"]) }
-        defer { close(fd) }
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -215,10 +634,29 @@ final class SocketIntegrationTests: XCTestCase {
             }
         }
         guard connectResult == 0 else {
+            close(fd)
             throw NSError(domain: "test", code: 2, userInfo: [NSLocalizedDescriptionKey: "connect() failed: errno \(errno)"])
         }
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        return fd
+    }
 
-        // Send Content-Length framed request
+    private func initializeClient(fd: Int32, name: String) throws {
+        try sendMCPRequest(on: fd, request: [
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [:] as [String: Any],
+                "clientInfo": ["name": name, "version": "1.0"]
+            ]
+        ])
+        _ = try readMCPMessage(fd: fd)
+    }
+
+    private func sendMCPRequest(on fd: Int32, request: [String: Any]) throws {
         let jsonData = try JSONSerialization.data(withJSONObject: request)
         let header = "Content-Length: \(jsonData.count)\r\n\r\n"
         var frame = Data(header.utf8)
@@ -230,11 +668,12 @@ final class SocketIntegrationTests: XCTestCase {
         guard sent == frame.count else {
             throw NSError(domain: "test", code: 3, userInfo: [NSLocalizedDescriptionKey: "write() incomplete"])
         }
+    }
 
-        // Read response with Content-Length framing
+    private func readMCPMessage(fd: Int32, timeout: TimeInterval = 5.0) throws -> [String: Any] {
         var buffer = Data()
         var readBuf = [UInt8](repeating: 0, count: 65536)
-        let deadline = Date().addingTimeInterval(5.0)
+        let deadline = Date().addingTimeInterval(timeout)
 
         while Date() < deadline {
             let n = read(fd, &readBuf, readBuf.count)
@@ -254,12 +693,45 @@ final class SocketIntegrationTests: XCTestCase {
                 }
             } else if n == 0 {
                 break // EOF
-            } else if errno != EAGAIN && errno != EINTR {
+            } else if errno != EAGAIN && errno != EINTR && errno != EWOULDBLOCK {
                 break
             }
             Thread.sleep(forTimeInterval: 0.01)
         }
 
         throw NSError(domain: "test", code: 4, userInfo: [NSLocalizedDescriptionKey: "Timeout reading response"])
+    }
+
+    private func sendLineJSON(_ object: [String: Any], to handle: FileHandle) throws {
+        let data = try JSONSerialization.data(withJSONObject: object)
+        handle.write(data)
+        handle.write(Data([0x0A]))
+    }
+
+    private func readLineJSON(from handle: FileHandle, timeout: TimeInterval = 5.0) throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        var buffer = Data()
+        let fd = handle.fileDescriptor
+        let flags = fcntl(fd, F_GETFL)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        var readBuf = [UInt8](repeating: 0, count: 4096)
+        while Date() < deadline {
+            let count = read(fd, &readBuf, readBuf.count)
+            if count > 0 {
+                buffer.append(contentsOf: readBuf[0..<count])
+                if let newlineIndex = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer[..<newlineIndex]
+                    return try JSONSerialization.jsonObject(with: line) as? [String: Any] ?? [:]
+                }
+            } else if count == 0 {
+                Thread.sleep(forTimeInterval: 0.01)
+            } else {
+                if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
+                    break
+                }
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+        throw NSError(domain: "test", code: 5, userInfo: [NSLocalizedDescriptionKey: "Timeout reading line JSON"])
     }
 }

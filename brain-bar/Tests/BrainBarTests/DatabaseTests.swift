@@ -9,6 +9,7 @@
 // - Single-writer architecture (no concurrent writes)
 
 import XCTest
+import SQLite3
 @testable import BrainBar
 
 final class DatabaseTests: XCTestCase {
@@ -64,6 +65,28 @@ final class DatabaseTests: XCTestCase {
         XCTAssertTrue(exists, "chunks_fts FTS5 table must exist")
     }
 
+    func testBrainbarAgentsTableExists() throws {
+        let exists = try db.tableExists("brainbar_agents")
+        XCTAssertTrue(exists, "brainbar_agents table must exist")
+    }
+
+    func testBrainbarSubscriptionsTableExists() throws {
+        let exists = try db.tableExists("brainbar_subscriptions")
+        XCTAssertTrue(exists, "brainbar_subscriptions table must exist")
+    }
+
+    func testUpsertSubscriptionRecoversMissingPubSubTables() throws {
+        db.exec("DROP TABLE IF EXISTS brainbar_subscriptions")
+        db.exec("DROP TABLE IF EXISTS brainbar_agents")
+
+        let record = try db.upsertSubscription(agentID: "agent-a", tags: ["agent-message"])
+
+        XCTAssertEqual(record.agentID, "agent-a")
+        XCTAssertEqual(record.tags, ["agent-message"])
+        XCTAssertTrue(try db.tableExists("brainbar_agents"))
+        XCTAssertTrue(try db.tableExists("brainbar_subscriptions"))
+    }
+
     // MARK: - Search (FTS5)
 
     func testFTSSearchReturnsResults() throws {
@@ -90,18 +113,50 @@ final class DatabaseTests: XCTestCase {
     // MARK: - Store
 
     func testStoreCreatesChunk() throws {
-        let id = try db.store(
+        let stored = try db.store(
             content: "Decision: Use GRDB for SQLite access",
             tags: ["decision", "architecture"],
             importance: 8,
             source: "mcp"
         )
 
-        XCTAssertFalse(id.isEmpty, "store should return a chunk ID")
+        XCTAssertFalse(stored.chunkID.isEmpty, "store should return a chunk ID")
+        XCTAssertGreaterThan(stored.rowID, 0)
 
         // Verify it's searchable
         let results = try db.search(query: "GRDB SQLite", limit: 10)
         XCTAssertFalse(results.isEmpty)
+    }
+
+    func testStoreRetriesThroughTransientWriteLock() throws {
+        var lockDB: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
+        XCTAssertEqual(sqlite3_open_v2(tempDBPath, &lockDB, flags, nil), SQLITE_OK)
+        guard let lockDB else {
+            XCTFail("Failed to open secondary lock connection")
+            return
+        }
+        defer { sqlite3_close(lockDB) }
+
+        XCTAssertEqual(sqlite3_exec(lockDB, "BEGIN IMMEDIATE", nil, nil, nil), SQLITE_OK)
+
+        let releaseExpectation = expectation(description: "release write lock")
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5.5, execute: DispatchWorkItem {
+            sqlite3_exec(lockDB, "COMMIT", nil, nil, nil)
+            releaseExpectation.fulfill()
+        })
+
+        let startedAt = Date()
+        let stored = try db.store(
+            content: "Store after transient lock",
+            tags: ["retry"],
+            importance: 5,
+            source: "mcp"
+        )
+
+        XCTAssertFalse(stored.chunkID.isEmpty)
+        XCTAssertGreaterThan(Date().timeIntervalSince(startedAt), 5.0)
+        wait(for: [releaseExpectation], timeout: 7.0)
     }
 
     // MARK: - Filter: project

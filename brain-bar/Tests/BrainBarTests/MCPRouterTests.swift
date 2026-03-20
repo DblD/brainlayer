@@ -35,11 +35,15 @@ final class MCPRouterTests: XCTestCase {
         // Must declare tool capabilities
         let capabilities = result?["capabilities"] as? [String: Any]
         XCTAssertNotNil(capabilities?["tools"])
+        let resources = capabilities?["resources"] as? [String: Any]
+        XCTAssertEqual(resources?["subscribe"] as? Bool, true)
+        let experimental = capabilities?["experimental"] as? [String: Any]
+        XCTAssertEqual((experimental?["claude/channel"] as? [String: Any])?.isEmpty, true)
     }
 
     // MARK: - Tools list
 
-    func testToolsListReturnsAllEightTools() throws {
+    func testToolsListReturnsAllTools() throws {
         let router = MCPRouter()
         let request: [String: Any] = [
             "jsonrpc": "2.0",
@@ -52,12 +56,13 @@ final class MCPRouterTests: XCTestCase {
         let tools = result?["tools"] as? [[String: Any]]
 
         XCTAssertNotNil(tools)
-        XCTAssertEqual(tools?.count, 8, "Should have exactly 8 tools")
+        XCTAssertEqual(tools?.count, 11, "Should have exactly 11 tools")
 
         let toolNames = Set(tools?.compactMap { $0["name"] as? String } ?? [])
         let expected: Set<String> = [
             "brain_search", "brain_store", "brain_recall", "brain_entity",
-            "brain_digest", "brain_update", "brain_expand", "brain_tags"
+            "brain_digest", "brain_update", "brain_expand", "brain_tags",
+            "brain_subscribe", "brain_unsubscribe", "brain_ack"
         ]
         XCTAssertEqual(toolNames, expected)
     }
@@ -119,6 +124,65 @@ final class MCPRouterTests: XCTestCase {
 
         XCTAssertNotNil(error, "Unknown tool should return JSON-RPC error")
         XCTAssertEqual(error?["code"] as? Int, -32601, "Should be method-not-found error")
+    }
+
+    func testBrainSubscribeToolIsServerHandled() throws {
+        let router = MCPRouter()
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_subscribe",
+                "arguments": [
+                    "subscriber_id": "agent-1",
+                    "tags": ["agent-message"]
+                ] as [String: Any]
+            ]
+        ]
+
+        let response = router.handle(request)
+        let result = response["result"] as? [String: Any]
+        XCTAssertEqual(result?["isError"] as? Bool, true)
+    }
+
+    func testBrainUnsubscribeToolIsServerHandled() throws {
+        let router = MCPRouter()
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_unsubscribe",
+                "arguments": [
+                    "subscriber_id": "agent-1"
+                ] as [String: Any]
+            ]
+        ]
+
+        let response = router.handle(request)
+        let result = response["result"] as? [String: Any]
+        XCTAssertEqual(result?["isError"] as? Bool, true)
+    }
+
+    func testBrainAckToolIsServerHandled() throws {
+        let router = MCPRouter()
+        let request: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_ack",
+                "arguments": [
+                    "agent_id": "agent-1",
+                    "seq": 42
+                ] as [String: Any]
+            ]
+        ]
+
+        let response = router.handle(request)
+        let result = response["result"] as? [String: Any]
+        XCTAssertEqual(result?["isError"] as? Bool, true)
     }
 
     // MARK: - Unknown method
@@ -199,6 +263,46 @@ final class MCPRouterTests: XCTestCase {
 
         XCTAssertEqual(results.count, 1, "Should return only high-importance result")
         XCTAssertEqual(results.first?["chunk_id"] as? String, "i-1")
+    }
+
+    func testBrainSearchUnreadOnlyFiltersAckedChunksByCursor() throws {
+        let tempDB = NSTemporaryDirectory() + "brainbar-unread-\(UUID().uuidString).db"
+        defer { try? FileManager.default.removeItem(atPath: tempDB) }
+        let db = BrainDatabase(path: tempDB)
+        defer { db.close() }
+
+        try db.insertChunk(id: "read-1", content: "Agent message already delivered", sessionId: "s1", project: "test", contentType: "assistant_text", importance: 5, tags: "[\"agent-message\"]")
+        try db.insertChunk(id: "unread-1", content: "Agent message still unread", sessionId: "s2", project: "test", contentType: "assistant_text", importance: 5, tags: "[\"agent-message\"]")
+        _ = try db.upsertSubscription(agentID: "agent-1", tags: ["agent-message"])
+        guard let readSeq = try db.chunkRowID(forChunkID: "read-1") else {
+            XCTFail("expected read-1 rowid")
+            return
+        }
+        try db.acknowledge(agentID: "agent-1", seq: readSeq)
+
+        let router = MCPRouter()
+        router.setDatabase(db)
+        let response = router.handle([
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "tools/call",
+            "params": [
+                "name": "brain_search",
+                "arguments": [
+                    "query": "agent message",
+                    "subscriber_id": "agent-1",
+                    "unread_only": true
+                ] as [String: Any]
+            ] as [String: Any]
+        ])
+
+        let result = response["result"] as? [String: Any]
+        let content = result?["content"] as? [[String: Any]]
+        let text = content?.first?["text"] as? String ?? "[]"
+        let results = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [[String: Any]] ?? []
+
+        XCTAssertEqual(results.count, 1, "Should return only unread chunks for the subscriber")
+        XCTAssertEqual(results.first?["chunk_id"] as? String, "unread-1")
     }
 
     // MARK: - Notifications (no id)
