@@ -841,6 +841,108 @@ def serve() -> None:
         raise typer.Exit(1)
 
 
+@app.command("setup-mcp")
+def setup_mcp(
+    port: int = typer.Option(8787, "--port", "-p", help="HTTP port for daemon"),
+    host: str = typer.Option("127.0.0.1", "--host", help="Bind address"),
+    scope: str = typer.Option("user", "--scope", "-s", help="MCP config scope (user/project/local)"),
+) -> None:
+    """Set up HTTP MCP transport — one command, done.
+
+    Ensures daemon is running with MCP enabled, generates an API key,
+    and registers brainlayer with Claude Code. Replaces the default
+    stdio transport with shared HTTP transport (saves ~1.2GB RAM per session).
+    """
+    import subprocess
+
+    import httpx
+
+    from ..paths import API_KEY_PATH, ensure_api_key
+
+    # Step 1: API key
+    api_key = ensure_api_key()
+    rprint(f"[green]✓[/] API key ready ({API_KEY_PATH})")
+
+    # Step 2: Check if daemon already running
+    url = f"http://{host}:{port}/health"
+    daemon_running = False
+    try:
+        resp = httpx.get(url, timeout=2)
+        health = resp.json()
+        if health.get("mcp"):
+            rprint(f"[green]✓[/] Daemon already running (port {port}, MCP enabled)")
+            daemon_running = True
+        else:
+            rprint(f"[yellow]![/] Daemon running on port {port} but MCP not enabled — restart with --mcp")
+            raise typer.Exit(1)
+    except (httpx.ConnectError, httpx.TimeoutException):
+        pass
+
+    # Step 3: Start daemon if needed
+    if not daemon_running:
+        rprint(f"[blue]…[/] Starting daemon on port {port}...")
+        subprocess.Popen(
+            [sys.executable, "-m", "brainlayer.daemon", "--http", str(port), "--host", host, "--mcp"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+
+        # Step 4: Wait for healthy
+        for _i in range(30):
+            time.sleep(1)
+            try:
+                resp = httpx.get(url, timeout=2)
+                if resp.json().get("status") == "healthy":
+                    rprint(f"[green]✓[/] Daemon started (port {port})")
+                    break
+            except (httpx.ConnectError, httpx.TimeoutException):
+                pass
+        else:
+            rprint("[red]✗[/] Daemon failed to start — check ~/.local/share/brainlayer/daemon.log")
+            raise typer.Exit(1)
+
+    # Step 5: Register with Claude Code
+    subprocess.run(["claude", "mcp", "remove", "brainlayer", "-s", scope], capture_output=True)
+
+    result = subprocess.run(
+        [
+            "claude",
+            "mcp",
+            "add",
+            "brainlayer",
+            f"http://{host}:{port}/mcp/",
+            "--transport",
+            "http",
+            "-s",
+            scope,
+            "--header",
+            f"Authorization: Bearer {api_key}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        rprint(f"[red]✗[/] claude mcp add failed: {result.stderr.strip()}")
+        rprint(
+            f"[dim]Run manually:[/] claude mcp add brainlayer http://{host}:{port}/mcp/ "
+            f'--transport http -s {scope} --header "Authorization: Bearer <key>"'
+        )
+        raise typer.Exit(1)
+
+    rprint(f"[green]✓[/] Registered with Claude Code (scope: {scope})")
+
+    # Step 6: Summary
+    rprint()
+    rprint("[bold green]Setup complete![/]")
+    rprint(f"  Daemon: http://{host}:{port}")
+    rprint(f"  MCP:    http://{host}:{port}/mcp/")
+    rprint(f"  Auth:   Bearer token from {API_KEY_PATH}")
+    rprint(f"  Scope:  {scope}")
+    rprint()
+    rprint("[dim]Restart Claude Code sessions to use the new transport.[/]")
+
+
 @app.command("migrate")
 def migrate() -> None:
     """Migrate from ChromaDB to sqlite-vec (one-time)."""
