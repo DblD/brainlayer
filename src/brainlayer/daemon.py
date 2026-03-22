@@ -35,6 +35,8 @@ API_COSTS_PATH = Path.home() / ".local" / "share" / "brainlayer" / "api_costs.js
 vector_store: Optional[VectorStore] = None
 embedding_model = None
 http_port: Optional[int] = None
+http_host: str = "127.0.0.1"
+mcp_enabled: bool = False
 
 
 class SearchRequest(BaseModel):
@@ -92,13 +94,78 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Model warmup failed: {e}")
 
-    yield
+    # Mount MCP transport if enabled
+    session_manager = None
+    if mcp_enabled:
+        try:
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager  # noqa: I001
+            from mcp.server.transport_security import TransportSecuritySettings
 
-    # Shutdown (only close once)
-    logger.info("Shutting down brainlayer daemon...")
-    if vector_store:
-        vector_store.close()
-        vector_store = None
+            from .mcp import server as mcp_server, set_shared_state
+            from .mcp._auth import BearerAuthASGIMiddleware, LocalTokenVerifier
+            from .paths import ensure_api_key
+
+            api_key = ensure_api_key()
+            set_shared_state(vector_store, embedding_model)
+
+            # DNS rebinding protection — allow all localhost representations
+            host = http_host or "127.0.0.1"
+            allowed_hosts = [f"{host}:{http_port}"]
+            if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+                allowed_hosts.extend(
+                    [
+                        f"127.0.0.1:{http_port}",
+                        f"localhost:{http_port}",
+                        f"[::1]:{http_port}",
+                    ]
+                )
+
+            security_settings = TransportSecuritySettings(
+                enable_dns_rebinding_protection=True,
+                allowed_hosts=allowed_hosts,
+                allowed_origins=[],
+            )
+
+            session_manager = StreamableHTTPSessionManager(
+                mcp_server,
+                security_settings=security_settings,
+            )
+
+            # Wrap with bearer token auth
+            verifier = LocalTokenVerifier(api_key)
+            authed_app = BearerAuthASGIMiddleware(session_manager.handle_request, verifier)
+            app.mount("/mcp", authed_app)
+
+            # Log file path to logger (safe for log aggregators)
+            from .paths import API_KEY_PATH
+
+            logger.info(f"MCP transport ready on :{http_port}/mcp/ (API key: {API_KEY_PATH})")
+
+            # Print full command to stdout only (local terminal, not shipped to aggregators)
+            print(
+                f"\n  claude mcp add -s user --transport http "
+                f'--header "Authorization:Bearer {api_key}" '
+                f"brainlayer http://{host}:{http_port}/mcp/\n"
+            )
+        except Exception as e:
+            logger.error(f"MCP transport failed to initialize: {e}")
+            session_manager = None
+
+    try:
+        if session_manager:
+            async with session_manager.run():
+                yield
+        else:
+            yield
+    finally:
+        logger.info("Shutting down brainlayer daemon...")
+        if mcp_enabled:
+            from .mcp import clear_shared_state
+
+            clear_shared_state()
+        if vector_store:
+            vector_store.close()
+            vector_store = None
 
 
 app = FastAPI(
@@ -130,8 +197,11 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "chunks": vector_store.count() if vector_store else 0}
+    """Health check endpoint (unauthenticated — monitoring/load balancer use)."""
+    result = {"status": "healthy", "chunks": vector_store.count() if vector_store else 0}
+    if mcp_enabled:
+        result["mcp"] = True
+    return result
 
 
 @app.get("/stats", response_model=StatsResponse)
@@ -1270,10 +1340,27 @@ def main():
     parser = argparse.ArgumentParser(description="BrainLayer daemon")
     parser.add_argument("--http", type=int, default=None, help="Also serve on HTTP port (e.g. --http 8787)")
     parser.add_argument("--host", type=str, default="127.0.0.1", help="HTTP bind address (default: 127.0.0.1)")
+    parser.add_argument(
+        "--mcp", action="store_true", default=False, help="Enable MCP transport at /mcp (requires --http)"
+    )
     args = parser.parse_args()
 
-    global http_port
+    global http_port, http_host, mcp_enabled
     http_port = args.http
+    http_host = args.host
+    mcp_enabled = args.mcp
+
+    if mcp_enabled and not args.http:
+        parser.error("--mcp requires --http (MCP transport needs an HTTP port)")
+
+    if args.host == "0.0.0.0":
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+        logging.getLogger(__name__).warning(
+            "SECURITY: --host 0.0.0.0 exposes the daemon to the network. "
+            "All MCP tools (including brain_store) are accessible to any "
+            "host that has the API key. Use a reverse proxy with TLS for "
+            "production network deployments."
+        )
 
     # Setup logging
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")

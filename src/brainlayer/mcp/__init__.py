@@ -6,7 +6,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from mcp.server import Server
+from mcp.server import Server  # noqa: I001
 from mcp.server.stdio import stdio_server
 from mcp.types import (
     CallToolResult,
@@ -29,6 +29,8 @@ from ._shared import (
 from ._shared import (
     _error_result,
     _get_vector_store,
+    clear_shared_state as clear_shared_state,
+    set_shared_state as set_shared_state,
     validate_config,
 )
 from ._shared import (

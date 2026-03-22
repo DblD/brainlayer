@@ -16,6 +16,24 @@ _store_lock = threading.Lock()
 _model_lock = threading.Lock()
 
 
+def set_shared_state(vector_store, embedding_model):
+    """Inject pre-loaded instances from daemon. Avoids duplicate model loads."""
+    global _vector_store, _embedding_model
+    with _store_lock:
+        _vector_store = vector_store
+    with _model_lock:
+        _embedding_model = embedding_model
+
+
+def clear_shared_state():
+    """Reset shared state to None. Used during daemon shutdown and test isolation."""
+    global _vector_store, _embedding_model
+    with _store_lock:
+        _vector_store = None
+    with _model_lock:
+        _embedding_model = None
+
+
 def _get_vector_store():
     """Get or initialize the global VectorStore (thread-safe)."""
     global _vector_store
