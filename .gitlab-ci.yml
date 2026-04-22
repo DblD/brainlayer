@@ -1,0 +1,50 @@
+# brainlayer CI — build + push container image to Harbor on tag.
+#
+# Trigger: git tag v<version> on feat/k8s-deploy branch, git push mwlab --tags
+# Produces: harbor.dbld.tech/brainlayer/daemon:<version> and :latest
+#
+# Image bakes bge-large-en-v1.5 (~1.3 GB) + spaCy en_core_web_sm at build time.
+# Final image is ~3.8 GB — kaniko needs the extra memory headroom.
+#
+# Required CI/CD variables (project-scoped, already set):
+#   HARBOR_REGISTRY  = harbor.dbld.tech
+#   HARBOR_USERNAME  = admin
+#   HARBOR_PASSWORD  = <masked>
+#   HARBOR_AUTH      = <base64(admin:Harbor123), masked>
+
+stages:
+  - build
+
+variables:
+  GIT_DEPTH: 0
+  IMAGE: "${HARBOR_REGISTRY}/brainlayer/daemon"
+  CACHE_REPO: "${HARBOR_REGISTRY}/brainlayer/cache"
+
+build:release:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  variables:
+    # Torch + CUDA wheels + HF model prefetch = memory spike. Allow 8Gi.
+    KUBERNETES_MEMORY_LIMIT: "8Gi"
+    KUBERNETES_CPU_LIMIT: "4"
+  before_script:
+    - mkdir -p /kaniko/.docker
+    - |
+      cat > /kaniko/.docker/config.json << EOF
+      {"auths":{"${HARBOR_REGISTRY}":{"auth":"${HARBOR_AUTH}"}}}
+      EOF
+  script:
+    - echo "Building brainlayer ${CI_COMMIT_TAG} from ${CI_COMMIT_SHORT_SHA}"
+    - /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "${IMAGE}:${CI_COMMIT_TAG}"
+      --destination "${IMAGE}:latest"
+      --cache=true
+      --cache-repo="${CACHE_REPO}"
+      --cache-ttl=720h
+      --use-new-run
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+(-.*)?$/
