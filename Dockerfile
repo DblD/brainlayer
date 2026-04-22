@@ -26,8 +26,12 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
-# Install via pip (uv would be faster; pip keeps Dockerfile simple + auditable)
+# Install via pip (uv would be faster; pip keeps Dockerfile simple + auditable).
+# Force CPU-only torch — cluster has no GPU; nvidia CUDA wheels (~3GB) are pure bloat.
+# The PyTorch CPU index serves a ~170MB torch wheel instead of ~800MB+ cuda variant,
+# and strips the entire nvidia-* wheel set pulled transitively by sentence-transformers.
 RUN pip install --upgrade pip setuptools wheel && \
+    pip install torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install .
 
 # Prefetch bge-large model + spaCy model into image (reproducible cold start)
