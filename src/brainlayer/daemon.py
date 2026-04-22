@@ -196,6 +196,32 @@ async def search(request: SearchRequest):
         raise HTTPException(status_code=500, detail="Search failed")
 
 
+class EmbedRequest(BaseModel):
+    """Embed request — returns the 1024-dim BGE vector for a text."""
+
+    text: str
+
+
+@app.post("/embed")
+async def embed(request: EmbedRequest):
+    """Embed text with the loaded BGE model. Used by external RAG consumers
+    that want to reuse this embedder without storing into brainlayer.
+
+    Returns: {"vector": float[1024], "model": "BAAI/bge-large-en-v1.5", "dim": 1024}
+    """
+    if not embedding_model:
+        raise HTTPException(status_code=503, detail="Embedding model not initialized")
+    if not request.text or not request.text.strip():
+        raise HTTPException(status_code=400, detail="text must be non-empty")
+
+    vector = embedding_model.embed_query(request.text)
+    return {
+        "vector": list(vector),
+        "model": "BAAI/bge-large-en-v1.5",
+        "dim": len(vector),
+    }
+
+
 @app.get("/context/{chunk_id}")
 async def get_context(chunk_id: str, before: int = 3, after: int = 3):
     """Get surrounding conversation context for a chunk."""

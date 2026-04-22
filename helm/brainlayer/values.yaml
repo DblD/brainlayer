@@ -1,0 +1,48 @@
+# BrainLayer daemon — deployable for cross-app /embed + /search.
+# Default deploys a *fresh* instance (empty memory DB, just the embedder).
+# To import Dario's personal DB, kubectl cp it to the PVC.
+
+image:
+  repository: harbor.dbld.tech/brainlayer/daemon
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 1  # single-writer sqlite-vec
+
+service:
+  type: ClusterIP
+  port: 8787
+
+# Set true to expose via ingress. Most in-cluster consumers (e.g. scott-gpt)
+# should hit the ClusterIP service directly — no ingress needed.
+ingress:
+  enabled: false
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  host: brain.dbld.tech
+  tls:
+    enabled: true
+    secretName: brain-dbld-tech-tls
+
+persistence:
+  enabled: true
+  storageClass: longhorn
+  accessMode: ReadWriteOnce
+  size: 10Gi
+
+# Resource envelope. bge-large needs ~1.5GB at rest + headroom for batching.
+resources:
+  requests:
+    cpu: 500m
+    memory: 2Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+
+# If you want embeddings on a GPU, uncomment and set accordingly
+# nodeSelector:
+#   gpu: nvidia
+# env:
+#   CUDA_VISIBLE_DEVICES: "0"
+env: {}
