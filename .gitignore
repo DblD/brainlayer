@@ -55,7 +55,6 @@ docs/plan/
 Thumbs.db
 
 # Lock files (reproducible installs handled via pyproject.toml)
-uv.lock
 
 # Claude scratchpad
 claude.scratchpad.md
