@@ -10,6 +10,7 @@ from mcp.types import TextContent
 
 from .._helpers import _escape_fts5_query
 from ..lexical_defense import _normalize_surface, load_lexical_defense_dictionary
+from ..rerank import DEFAULT_OVERFETCH, apply_rerank_to_results, get_rerank_url
 
 # Retry settings for DB lock resilience on reads
 _RETRY_MAX_ATTEMPTS = 3
@@ -875,6 +876,12 @@ async def _search(
         model = _get_embedding_model()
         query_embedding = await loop.run_in_executor(None, model.embed_query, query)
 
+        # Rerank stage (opt-in via BRAINLAYER_RERANK_URL): over-fetch vector hits so
+        # the cross-encoder reranker has a wider candidate pool, then reorder and trim
+        # back to num_results below. Disabled → fetch exactly num_results as before.
+        rerank_url = get_rerank_url()
+        effective_n_results = max(num_results, DEFAULT_OVERFETCH) if rerank_url else num_results
+
         if source == "all":
             source_filter = None
         elif source:
@@ -896,7 +903,7 @@ async def _search(
                     query_embedding=query_embedding,
                     query_text=query,
                     fts_query_override=fts_query_override,
-                    n_results=num_results,
+                    n_results=effective_n_results,
                     project_filter=normalized_project,
                     content_type_filter=content_type,
                     source_filter=source_filter,
@@ -926,6 +933,11 @@ async def _search(
             empty = {"query": query, "total": 0, "results": []}
             return ([TextContent(type="text", text="No results found.")], empty)
 
+        # Reorder the over-fetched candidates with the cross-encoder reranker and trim
+        # back to num_results. Fail-safe: endpoint down → original vector order kept.
+        if rerank_url:
+            results = apply_rerank_to_results(query, results, num_results, rerank_url)
+
         results = store.enrich_results_with_session_context(results)
 
         if detail == "compact":
@@ -934,21 +946,22 @@ async def _search(
                 results["ids"][0], results["documents"][0], results["metadatas"][0], results["distances"][0]
             ):
                 score = 1 - dist if dist is not None else 0
-                item = _build_compact_result(
-                    {
-                        "score": round(score, 4),
-                        "chunk_id": cid,
-                        "project": _normalize_project_name(meta.get("project")) or meta.get("project", "unknown"),
-                        "content": doc,
-                        "source_file": meta.get("source_file", "unknown"),
-                        "date": meta.get("created_at", "")[:10] if meta.get("created_at") else None,
-                        "importance": meta.get("importance"),
-                        "summary": meta.get("summary"),
-                        "tags": [str(t) for t in meta["tags"][:5]]
-                        if meta.get("tags") and isinstance(meta["tags"], list)
-                        else None,
-                    }
-                )
+                compact_payload = {
+                    "score": round(score, 4),
+                    "chunk_id": cid,
+                    "project": _normalize_project_name(meta.get("project")) or meta.get("project", "unknown"),
+                    "content": doc,
+                    "source_file": meta.get("source_file", "unknown"),
+                    "date": meta.get("created_at", "")[:10] if meta.get("created_at") else None,
+                    "importance": meta.get("importance"),
+                    "summary": meta.get("summary"),
+                    "tags": [str(t) for t in meta["tags"][:5]]
+                    if meta.get("tags") and isinstance(meta["tags"], list)
+                    else None,
+                }
+                if meta.get("rerank_score") is not None:
+                    compact_payload["rerank_score"] = meta["rerank_score"]
+                item = _build_compact_result(compact_payload)
                 structured_results.append(item)
             structured = {"query": query, "total": len(structured_results), "results": structured_results}
             formatted_text = format_search_results(query, structured_results, len(structured_results))
@@ -969,6 +982,8 @@ async def _search(
                 "content": doc,
                 "source_file": meta.get("source_file", "unknown"),
             }
+            if meta.get("rerank_score") is not None:
+                item["rerank_score"] = meta["rerank_score"]
             if meta.get("created_at"):
                 item["date"] = meta["created_at"][:10] if len(meta.get("created_at", "")) >= 10 else meta["created_at"]
             if meta.get("source") and meta["source"] != "claude_code":
